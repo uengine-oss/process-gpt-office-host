@@ -1,0 +1,12 @@
+**/node_modules
+**/.git
+ieumoffice/apps/hwp/public/studio
+ieumoffice/apps/sheets/native/xlsx-engine/target
+ieumoffice/apps/*/out
+ieumoffice/apps/*/dist
+.toolchain
+dist
+host/dist
+host-data
+demo
+docs

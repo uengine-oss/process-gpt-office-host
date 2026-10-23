@@ -1,0 +1,10 @@
+# build output and local data (README §9)
+dist/
+host/dist/
+host-data/
+.toolchain/
+node_modules
+# local demo recordings and screenshots (large, machine-specific)
+demo/
+docs/
+.DS_Store
