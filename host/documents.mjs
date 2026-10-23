@@ -37,6 +37,17 @@ export const safeName = (name) =>
 export const stamp = () => new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14)
 
 /**
+ * where the edited copy of a stored object goes: beside it, `edited-<stem>_<time>.<ext>`.
+ * Named after the stored object, not the display name (storage keys must stay ASCII);
+ * an edited copy of an edited copy keeps the original stem instead of edited-edited-….
+ */
+export function editedObjectPath(path, ext) {
+  const stem = path.split('/').pop().replace(/\.[^.]+$/, '')
+  const base = (/^edited-(.+)_\d{14}$/.exec(stem) || [])[1] || stem
+  return path.replace(/[^/]*$/, `edited-${base}_${stamp()}.${ext}`)
+}
+
+/**
  * A Supabase Storage object URL → { origin, bucket, path } (public, signed or
  * authenticated form). The origin is what the browser used; uploads go to
  * SUPABASE_URL (which may be an internal address) and the returned URL keeps the
@@ -161,9 +172,7 @@ async function publishSave(contents, file) {
     const object = contents.source?.object
     const auth = object && storageAuth(contents.userToken)
     if (auth) {
-      // named after the stored object, not the display name: storage keys must stay ASCII
-      const stem = object.path.split('/').pop().replace(/\.[^.]+$/, '')
-      contents.editedPath ??= object.path.replace(/[^/]*$/, `edited-${stem}_${stamp()}.${ext}`)
+      contents.editedPath ??= editedObjectPath(object.path, ext)
       url = await uploadToStorage(object, contents.editedPath, bytes, CONTENT_TYPES[ext] || 'application/octet-stream', auth)
     } else if (contents.source?.local) {
       // local trial: keep the edit beside the sample, never over it

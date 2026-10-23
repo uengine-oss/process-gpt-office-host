@@ -28,7 +28,7 @@ import { createContext, disposeContext, runJson } from '@ieum/packages/cli/src/m
 import { bearerOf, verifyToken } from './auth.mjs'
 import { announce, runLive, sessionFor, sessionsOf } from './live.mjs'
 import {
-  CONTENT_TYPES, hostDataRoot, isAllowedSource, newDocumentObject, safeName, stamp, storageAuth,
+  CONTENT_TYPES, editedObjectPath, hostDataRoot, isAllowedSource, newDocumentObject, safeName, storageAuth,
   storageObjectOf, uploadToStorage,
 } from './documents.mjs'
 
@@ -44,6 +44,23 @@ const editorUrl = (fileUrl, name) => {
   return editor ? `${PUBLIC_URL}/office/${editor}/?src=${encodeURIComponent(fileUrl)}&name=${encodeURIComponent(name || '')}` : null
 }
 const report = (ok) => ({ status: ok.status, summary: ok.summary, warnings: ok.warnings, detail: ok.detail })
+
+// ops are an array of objects; agents sometimes send that array as a JSON string
+const OPS = z
+  .union([z.array(z.record(z.string(), z.any())), z.string()])
+  .describe('형식별 연산 객체의 배열(office_guide 참고), 예: [{"op":"findReplace","find":"…","replace":"…"}]')
+function opsList(ops) {
+  let list = ops
+  if (typeof list === 'string') {
+    try {
+      list = JSON.parse(list)
+    } catch {
+      throw new Error('ops 는 연산 객체의 배열(JSON)이어야 합니다')
+    }
+  }
+  if (!Array.isArray(list) || !list.length) throw new Error('ops 는 비어 있지 않은 연산 객체의 배열이어야 합니다')
+  return list
+}
 
 /**
  * what a tool says about a document it wrote (an edited copy, a conversion). process-gpt's
@@ -155,20 +172,19 @@ function buildServer(userToken, claims) {
     {
       description:
         '문서를 연산(ops)으로 고친다(docx·xlsx·pptx). 원본은 그대로 두고 고친 문서를 원본 옆에 edited-… 로 올려 그 file_url 을 돌려준다. 거절된 연산은 번호와 이유가 결과에 온다.',
-      inputSchema: { file_url: z.string(), ops: z.any().describe('형식별 연산 목록(office_guide 참고)') },
+      inputSchema: { file_url: z.string(), ops: OPS },
     },
     async ({ file_url, ops }) =>
       inScratch(async (ctx, dir) => {
         const doc = await download(file_url, dir)
         const verb = { docx: 'docs', odt: 'docs', xlsx: 'sheet', pptx: 'slides' }[doc.ext]
         if (!verb) return failure(`이 형식은 연산으로 고칠 수 없습니다: .${doc.ext}${doc.ext.startsWith('hwp') ? ' (한글 문서는 편집기에서 고칩니다)' : ''}`)
-        writeFileSync(join(dir, 'ops.json'), JSON.stringify(ops))
+        writeFileSync(join(dir, 'ops.json'), JSON.stringify(opsList(ops)))
         const out = join(dir, `edited.${doc.ext}`)
         const ok = await run(ctx, [verb, 'apply', doc.path, '--ops', join(dir, 'ops.json'), '--out', out])
         const source = storageObjectOf(file_url)
         const object = source ?? newDocumentObject(doc.ext)
-        const stem = (source?.path ?? object.path).split('/').pop().replace(/\.[^.]+$/, '')
-        const path = source ? source.path.replace(/[^/]*$/, `edited-${stem}_${stamp()}.${doc.ext}`) : object.path
+        const path = source ? editedObjectPath(source.path, doc.ext) : object.path
         const fileUrl = await publish(object, path, readFileSync(out), doc.ext)
         return text(documentResult(fileUrl, doc.name, ok))
       }),
@@ -290,12 +306,13 @@ function registerLiveTools(server, claims) {
     'office_live_apply_ops',
     {
       description: '열린 문서에 편집 연산을 적용한다(워드 apply_ops, 엑셀 시트 연산). 연산 형식은 office_guide 참고.',
-      inputSchema: { session_id: z.string(), ops: z.array(z.any()) },
+      inputSchema: { session_id: z.string(), ops: OPS },
     },
     async ({ session_id, ops }) =>
       live(session_id, async (c) => {
-        announce(c, { action: 'ops', text: `편집 ${ops.length}건` })
-        return runLive(c, 'apply_ops', { ops })
+        const list = opsList(ops)
+        announce(c, { action: 'ops', text: `편집 ${list.length}건` })
+        return runLive(c, 'apply_ops', { ops: list })
       }),
   )
 
