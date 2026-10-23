@@ -85,7 +85,7 @@ Docker: 이 저장소 루트에서 `docker build -t process-gpt-office-host .`(�
 | 채팅 문서 패널 | 채팅에서 에이전트가 `office_apply_ops`로 고친 문서가 옆 패널 편집기로 열리고, 이어서 실시간으로 채움 |
 | MCP 도구 | MCP 클라이언트로 도구 목록·읽기·연산 편집(배열과 JSON 문자열 둘 다)·실시간 도구 |
 
-시연 영상(6분 32초, 18장면, 실제 화면)은 홈페이지 브랜치의 `media/processgpt/processgpt-office-demo.mp4`에 있다. 영상을 만드는 녹화·검증 스크립트(Playwright 정지화면 + ElevenLabs 나레이션)는 로컬 개발 데이터와 계정에 묶여 있어 저장소에 넣지 않았다. 필요하면 정리해서 openspec 스펙 폴더의 `e2e/`로 옮기는 것이 이 저장소들의 규칙에 맞다.
+시연 영상(6분 32초, 18장면, 실제 화면)은 [YouTube](https://youtu.be/rItCQPQFPis)와 홈페이지 브랜치의 `media/processgpt/processgpt-office-demo.mp4`(한국어 자막 VTT 포함)에 있다. 영상을 만드는 녹화·검증 스크립트(Playwright 정지화면 + ElevenLabs 나레이션)는 로컬 개발 데이터와 계정에 묶여 있어 저장소에 넣지 않았다. 필요하면 정리해서 openspec 스펙 폴더의 `e2e/`로 옮기는 것이 이 저장소들의 규칙에 맞다.
 
 ## 6. 남은 일 (우선순위 순)
 
