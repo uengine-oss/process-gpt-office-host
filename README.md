@@ -50,7 +50,7 @@ Process GPT (Vue 3)                                   office-host (Node 22, 컨�
 | `office_guide` | 형식별 편집 연산(op) 설명서 |
 | `office_read_document` | 저장소의 문서를 읽는다(docx·xlsx·pptx·pdf·hwp·hwpx) |
 | `office_apply_ops` | 문서를 연산으로 고쳐 원본 옆에 `edited-…`로 올린다(docx·xlsx·pptx) |
-| `office_convert` | 다른 형식으로 바꿔 올린다(예: docx→pdf) |
+| `office_convert` | 다른 형식으로 바꿔 올린다(docx→md·odt, md→docx·html·odt, pdf→docx·pptx·xlsx·md·epub, xlsx→csv 등). PDF로 내보내기는 데스크톱 앱의 숨은 창이 필요해 막아 두었다 |
 | `office_live_documents` | 이 사용자가 지금 편집기에 열어 둔 문서 |
 | `office_live_read` | 열린 문서의 지금 내용(블록 번호가 붙은 본문, 엑셀은 셀) |
 | `office_live_write` / `office_live_replace` | 열린 워드 문서에 넣는다 / 바꾼다. `match_text`로 "(작성 예정)" 같은 자리를 글로 찾아 바꾼다 |
@@ -187,7 +187,7 @@ Process GPT 쪽(`process-gpt-vue3`)은 다음과 같다. 사용자가 작업 중
 ## 8. 남은 일
 
 1. **채팅 문서 패널은 프론트 쪽에서 풀었다(2026-10-23).**
-   - deepagents는 MCP 도구 결과를 `content=[{'type': 'text', …}]` 꼴의 문자열로 채팅에 보낸다. 채팅 화면의 도구 결과 해석이 이 꼴도 읽게 고쳤다(process-gpt-vue3).
+   - deepagents는 MCP 도구 결과를 `content=[{'type': 'text', …}]` 꼴의 문자열로 채팅에 보낸다. process-gpt-vue3 `main`의 도구 결과 해석(`shared/toolOutput`)은 이미 이 꼴을 읽는다. 그보다 오래된 브랜치에서는 채팅방의 해석에 이 꼴을 더해야 한다.
    - 그래서 에이전트가 고친 워드 문서(`html_url`이 붙은 결과)가 채팅 옆 문서 패널의 편집기로 열리고, 이어서 실시간 도구로 그 문서를 채우는 모습을 채팅 화면 안에서 본다.
    - 패널에서 저장하면 메시지의 문서 카드도 편집본으로 바뀐다(`office-saved`).
    - 근본 원인은 deepagents가 도구 결과 메시지를 통째로 문자열로 바꾸는 데 있다. deepagents 쪽에서 블록의 `text`를 보내게 고치면 다른 소비자도 깔끔해진다. 공유 서비스라 재시작이 필요해 손대지 않았다.

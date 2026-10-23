@@ -49,6 +49,29 @@ const report = (ok) => ({ status: ok.status, summary: ok.summary, warnings: ok.w
 const OPS = z
   .union([z.array(z.record(z.string(), z.any())), z.string()])
   .describe('형식별 연산 객체의 배열(office_guide 참고), 예: [{"op":"findReplace","find":"…","replace":"…"}]')
+/**
+ * conversions the CLI runs in this process. Its other routes (anything to pdf, docx→html,
+ * html→docx) go through the desktop app's hidden export window, which a server does not
+ * have — they would hang, so they are refused up front.
+ */
+const CONVERSIONS = {
+  pdf: ['docx', 'pptx', 'xlsx', 'md', 'epub'],
+  csv: ['xlsx'],
+  xls: ['xlsx'],
+  xlsb: ['xlsx'],
+  ods: ['xlsx'],
+  md: ['docx', 'html', 'odt'],
+  markdown: ['docx', 'html', 'odt'],
+  docx: ['md', 'odt'],
+  odt: ['docx', 'md'],
+  xlsx: ['csv'],
+  xlsm: ['csv'],
+}
+const conversionList = Object.entries(CONVERSIONS)
+  .filter(([from]) => from !== 'markdown')
+  .map(([from, to]) => `${from}→${to.join('·')}`)
+  .join(', ')
+
 function opsList(ops) {
   let list = ops
   if (typeof list === 'string') {
@@ -193,13 +216,17 @@ function buildServer(userToken, claims) {
   server.registerTool(
     'office_convert',
     {
-      description: '문서를 다른 형식으로 바꿔 올린다(예: md→docx, docx→md·html·odt, pdf→md, xlsx→csv). 결과: file_url.',
+      description: `문서를 다른 형식으로 바꿔 올린다. 되는 것: ${conversionList}. PDF로 내보내기는 아직 되지 않는다. 결과: file_url.`,
       inputSchema: { file_url: z.string(), to: z.string().describe('대상 형식 확장자') },
     },
     async ({ file_url, to }) =>
       inScratch(async (ctx, dir) => {
-        const doc = await download(file_url, dir)
         const ext = to.replace(/^\./, '').toLowerCase()
+        const from = extOf(file_url)
+        if (!CONVERSIONS[from]?.includes(ext)) {
+          return failure(`${from || '이 형식'} → ${ext} 변환은 서버에서 하지 않습니다. 되는 것: ${conversionList}`)
+        }
+        const doc = await download(file_url, dir)
         const out = join(dir, `converted.${ext}`)
         const ok = await run(ctx, ['convert', doc.path, '--to', ext, '--out', out])
         const object = newDocumentObject(ext)
