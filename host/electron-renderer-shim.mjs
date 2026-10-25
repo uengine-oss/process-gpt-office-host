@@ -108,7 +108,10 @@ const AI_ENTRY = '.ai-entry, .ai-rail, .expand-copilot, .copilot-badge, .stage-a
 function useParentAssistant() {
   const style = document.createElement('style')
   style.id = 'ieum-parent-assistant'
-  style.textContent = '.ai-dock, .copilot, .ai-panel-resizer, .expand-copilot { display: none !important; }'
+  // the sheets editor lays its AI panel out as the first column of .sheet-body's grid: one column without it
+  style.textContent =
+    '.ai-dock, .copilot, .ai-panel-resizer, .expand-copilot { display: none !important; }' +
+    ' .sheet-body { grid-template-columns: minmax(0, 1fr) !important; } .sheet-body > .sheet-main { margin-left: 0 !important; }'
   ;(document.head || document.documentElement).appendChild(style)
   window.addEventListener(
     'click',
