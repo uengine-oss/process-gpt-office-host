@@ -92,6 +92,42 @@ window.addEventListener('message', (event) => {
   if (event.data.type === 'context') void post({ t: 'context', context: event.data.context })
 })
 
+// One assistant: a framing page with its own (process-gpt's chat, which edits this open
+// document through office_live_*) asks for `?assistant=parent`. Then the editor's AI dock stays
+// hidden and its AI buttons — the 도우미 entry, its rail, the one-click presets — ask the page
+// instead: { type: 'assistant', label, prompt?, selection? }. prompt is null for "open the assistant".
+const PRESET_PROMPTS = [
+  [/요약/, (sel) => (sel ? '선택한 내용을 요약해 주세요' : '이 문서의 주요 내용과 핵심 사항을 요약해 주세요')],
+  [/다듬/, (sel) => (sel ? '선택한 내용을 다듬어 더 명확하고 매끄럽게 만들어 주세요' : '문서 전체를 다듬어 더 명확하고 매끄럽게 만들어 주세요')],
+  [/서식\s*정리/, () => '문서 전체 서식을 정리해 주세요(제목 수준, 목록 형식 통일, 불필요한 굵게·기울임 제거). 본문 글은 바꾸지 마세요'],
+  [/분석/, () => '이 시트의 데이터를 분석하고 주요 발견 사항, 추세, 이상값을 요약해 주세요'],
+  [/검사/, () => '이 시트의 문제(수식 오류, 형식 혼용, 합계 불일치)를 검사하고 수정 방안을 알려 주세요'],
+  [/핵심/, () => '이 문서의 핵심 내용을 뽑아 주세요'],
+]
+const AI_ENTRY = '.ai-entry, .ai-rail, .expand-copilot, .copilot-badge, .stage-ai-btn'
+function useParentAssistant() {
+  const style = document.createElement('style')
+  style.id = 'ieum-parent-assistant'
+  style.textContent = '.ai-dock, .copilot, .ai-panel-resizer, .expand-copilot { display: none !important; }'
+  ;(document.head || document.documentElement).appendChild(style)
+  window.addEventListener(
+    'click',
+    (e) => {
+      const button = e.target instanceof Element ? e.target.closest(AI_ENTRY) : null
+      if (!button || button.disabled) return
+      e.preventDefault()
+      e.stopImmediatePropagation()
+      const label = (button.textContent || button.getAttribute('data-tip') || button.title || '').replace(/\s+/g, ' ').trim()
+      const selection = String(window.getSelection?.() || '').trim().slice(0, 2000)
+      const preset = /도우미|assistant/i.test(label) || button.matches('.ai-rail, .expand-copilot, .copilot-badge') ? null : PRESET_PROMPTS.find(([re]) => re.test(label))
+      const prompt = preset ? preset[1](selection) : /도우미|assistant/i.test(label) || !label ? null : `${label.replace(/^AI\s*/, '')} — 이 문서에 해 주세요`
+      toParent('assistant', { label, prompt, selection })
+    },
+    true,
+  )
+}
+if (params.get('assistant') === 'parent' && window.parent !== window) useParentAssistant()
+
 // The desktop app takes some shortcuts in the main process (before-input-event: the HWP
 // editor's Ctrl/⌘+S and +P, which its inner iframe would otherwise swallow). Forward
 // them, from this page and from same-origin frames inside it. The server's platform

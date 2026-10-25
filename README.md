@@ -67,6 +67,16 @@ Process GPT (Vue 3)                                   office-host (Node 22, 컨�
 - 에이전트가 쓰기 시작하면 host가 `office:agent`를 보낸다. Process GPT의 `OfficeEditorFrame`은 이것을 "에이전트가 내용을 바꾸는 중 · …" 알림으로 띄운다.
 - 저장하면 첨부가 편집본으로 바뀐다(기존 `saved` 흐름).
 
+### 2.4 도우미는 하나: `?assistant=parent`
+
+틀 페이지에 자기 도우미가 있으면(pgpt-pro의 채팅이 `office_live_*`로 열린 문서를 고친다) 편집기 주소에 `assistant=parent`를 붙인다. 그러면 편집기 페이지(`host/electron-renderer-shim.mjs`, 포크 소스는 그대로)가
+
+- 내장 AI 패널(`.ai-dock`·`.copilot`·크기 조절 손잡이)을 숨기고,
+- AI 버튼(`AI 도우미`·AI 레일·`AI 요약`·`AI 다듬기`·`AI 서식 정리`·`AI 분석`·`AI 검사` 등 `.ai-entry`)의 클릭을 가로채
+- 부모에게 `{ source: 'ieum-office', type: 'assistant', label, prompt, selection }`을 보낸다. `prompt`는 버튼에 맞는 요청 문장(선택한 글이 있으면 선택 기준), `AI 도우미`처럼 "도우미를 열어라"이면 `null`이다.
+
+틀 페이지가 그 요청을 자기 채팅으로 보내거나 입력창을 연다. 주소에 없으면 지금처럼 편집기 자체 AI가 뜬다.
+
 `ops`는 연산 객체의 배열이다. 에이전트가 배열을 JSON 문자열로 보내는 일이 있어서 둘 다 받는다(타입 없는 스키마에서는 실제로 문자열로 왔다).
 
 여러 곳을 블록 번호로 바꾸면 앞의 변경이 뒤의 번호를 민다. 실제로 이 때문에 에이전트가 제목을 덮어쓴 일이 있어서, `match_text`를 넣고 도구 설명에 "뒤에서부터 바꾸거나 다시 읽기"를 적었다.
