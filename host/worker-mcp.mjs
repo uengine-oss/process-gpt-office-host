@@ -253,7 +253,7 @@ function registerLiveTools(server, claims) {
   server.registerTool(
     'office_live_documents',
     {
-      description: '이 사용자가 지금 편집기에 열어 둔 문서 목록. 여기 나온 문서는 office_live_* 도구로 사람이 보는 앞에서 고칠 수 있다(워드·엑셀).',
+      description: '이 사용자가 지금 편집기에 열어 둔 문서 목록. 여기 나온 문서는 office_live_* 도구로 사람이 보는 앞에서 고칠 수 있다(워드·엑셀·한글).',
       inputSchema: {},
       annotations: { readOnlyHint: true },
     },
@@ -271,6 +271,67 @@ function registerLiveTools(server, claims) {
       live(session_id, (c) =>
         c.editorName === 'sheets' ? runLive(c, 'read_sheet', { addresses, sheet }) : runLive(c, 'read_document', {}),
       ),
+  )
+
+  // 한글: the page answers with the editor's agent plugin (page-live.mjs); tables are numbered from 1
+  // in reading order (office_live_read lists them), rows and columns from 1
+  server.registerTool(
+    'office_live_hwp_table',
+    {
+      description:
+        '열린 한글 문서의 표를 읽고 고친다(사람이 보는 화면에 바로). action: read(표 내용) · fill(cells 의 칸에 글 넣기, 칸 서식은 그대로) · add_rows(at 행 뒤/앞에 count 줄, 새 줄은 이웃 줄 서식) · remove_rows. 표 번호·행·열은 1부터(office_live_read 의 tables, 사용자가 가리킨 "@표 N" 이 그 번호).',
+      inputSchema: {
+        session_id: z.string(),
+        action: z.enum(['read', 'fill', 'add_rows', 'remove_rows']),
+        table: z.number().int().min(1),
+        cells: z.array(z.object({ row: z.number().int().min(1), col: z.number().int().min(1), text: z.string() })).optional(),
+        at: z.number().int().min(1).optional(),
+        where: z.enum(['after', 'before']).optional(),
+        count: z.number().int().min(1).max(50).optional(),
+      },
+    },
+    async ({ session_id, action, table, cells, at, where, count }) =>
+      live(session_id, async (c) => {
+        if (c.editorName !== 'hwp') throw new Error('office_live_hwp_table 은 한글 문서에만 쓴다')
+        if (action === 'read') return runLive(c, 'read_table', { table })
+        announce(c, { action: action === 'fill' ? 'replace' : 'ops', text: `표 ${table}` })
+        if (action === 'fill') {
+          if (!cells?.length) throw new Error('fill 에는 cells 가 필요하다')
+          return runLive(c, 'fill_cells', { table, cells, overwrite: true })
+        }
+        if (!at) throw new Error(`${action} 에는 at(행 번호)이 필요하다`)
+        return runLive(c, action, { table, at, where: where || 'after', count: count || 1 })
+      }),
+  )
+
+  server.registerTool(
+    'office_live_hwp_text',
+    {
+      description:
+        '열린 한글 문서의 글을 고친다. replace: find 를 replace 로(같은 글이 여럿이면 occurrence, 1부터) · insert: anchor 가 든 문단 뒤(where=after)/앞에 paragraphs 를 새 문단으로.',
+      inputSchema: {
+        session_id: z.string(),
+        action: z.enum(['replace', 'insert']),
+        find: z.string().optional(),
+        replace: z.string().optional(),
+        occurrence: z.number().int().min(1).optional(),
+        anchor: z.string().optional(),
+        where: z.enum(['after', 'before']).optional(),
+        paragraphs: z.array(z.string()).optional(),
+      },
+    },
+    async ({ session_id, action, find, replace, occurrence, anchor, where, paragraphs }) =>
+      live(session_id, async (c) => {
+        if (c.editorName !== 'hwp') throw new Error('office_live_hwp_text 는 한글 문서에만 쓴다')
+        if (action === 'replace') {
+          if (!find) throw new Error('replace 에는 find 가 필요하다')
+          announce(c, { action: 'replace', text: words(replace || '') })
+          return runLive(c, 'replace_text', { find, replace: replace ?? '', occurrence })
+        }
+        if (!anchor || !paragraphs?.length) throw new Error('insert 에는 anchor 와 paragraphs 가 필요하다')
+        announce(c, { action: 'write', text: words(paragraphs.join(' ')) })
+        return runLive(c, 'insert_paragraphs', { anchor, where: where || 'after', paragraphs })
+      }),
   )
 
   server.registerTool(

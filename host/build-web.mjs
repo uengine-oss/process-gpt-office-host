@@ -14,6 +14,26 @@ const out = resolve(here, '../dist/web')
 const ALL = ['docs', 'sheets', 'slides', 'pdf', 'markdown', 'html', 'mindmap', 'hwp']
 const editors = process.env.EDITORS ? process.env.EDITORS.split(',') : ALL
 
+// The 한글 editor (@rhwp/editor) lives in the app's React state; the host page's live tools and
+// click-to-mention (electron-renderer-shim.mjs) need the same object. Every editor createEditor()
+// makes is also announced on the window ('ieum-rhwp-editor'). The fork's source is untouched.
+function exposeRhwpEditor() {
+  return {
+    name: 'ieum-expose-rhwp-editor',
+    transform(code, id) {
+      if (!/[\\/]@rhwp[\\/]editor[\\/]index\.js$/.test(id)) return null
+      const marker = 'export async function createEditor('
+      if (!code.includes(marker)) throw new Error('expose-rhwp-editor: @rhwp/editor createEditor changed')
+      return code.replace(marker, 'async function __ieumCreateEditor(') +
+        `\nexport async function createEditor(...args) {
+  const editor = await __ieumCreateEditor(...args)
+  try { (globalThis.__ieumRhwpEditors ||= []).push(editor); globalThis.dispatchEvent(new CustomEvent('ieum-rhwp-editor', { detail: editor })) } catch {}
+  return editor
+}\n`
+    },
+  }
+}
+
 for (const editor of editors) {
   const appDir = resolve(fork, 'apps', editor)
   const require = createRequire(resolve(appDir, 'package.json'))
@@ -31,7 +51,7 @@ for (const editor of editors) {
       base: './',
       logLevel: 'warn',
       build: { outDir: resolve(out, editor), emptyOutDir: true, reportCompressedSize: false },
-      plugins: [viteBrand()],
+      plugins: [viteBrand(), exposeRhwpEditor()],
     }),
   )
   console.log(`built ${editor} in ${((Date.now() - started) / 1000).toFixed(1)}s`)

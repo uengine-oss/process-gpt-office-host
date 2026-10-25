@@ -3,6 +3,7 @@
 // web host over one WebSocket (invoke = request/response, send = one-way,
 // on = pushes from webContents.send on the host).
 import { decode, encode } from './wire.mjs'
+import { installPageLive } from './page-live.mjs'
 
 const params = new URLSearchParams(location.search)
 // the host sits one level above the editor page (/office/<editor>/ → /office/);
@@ -204,6 +205,14 @@ export const ipcRenderer = {
     return ipcRenderer
   },
 }
+
+// click-to-mention, the 한글 live session and picture round trips (page-live.mjs)
+installPageLive({
+  editor: typeof __IEUM_EDITOR__ === 'string' ? __IEUM_EDITOR__ : '',
+  ipcRenderer,
+  toParent,
+  assistantParent: params.get('assistant') === 'parent' && window.parent !== window,
+})
 
 export const contextBridge = {
   exposeInMainWorld(key, api) {

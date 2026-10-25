@@ -8,7 +8,8 @@
 import { randomUUID } from 'node:crypto'
 import { ipcMain, webContents } from './electron-main-shim.mjs'
 
-export const LIVE_EDITORS = new Set(['docs', 'sheets'])
+// 한글: the page answers for its editor (page-live.mjs), the editors' own bridge covers docs and sheets
+export const LIVE_EDITORS = new Set(['docs', 'sheets', 'hwp'])
 const pending = new Map() // requestId -> { resolve, timer }
 
 for (const editor of LIVE_EDITORS) {

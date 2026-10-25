@@ -77,6 +77,23 @@ Process GPT (Vue 3)                                   office-host (Node 22, 컨�
 
 틀 페이지가 그 요청을 자기 채팅으로 보내거나 입력창을 연다. 주소에 없으면 지금처럼 편집기 자체 AI가 뜬다.
 
+### 2.5 가리켜서 말하기, 한글 실시간 편집, 그림 왕복 (`host/page-live.mjs`)
+
+`assistant=parent` 페이지에서는 세 가지가 더 붙는다. 포크 소스는 그대로다(한글 편집기 객체는 `build-web.mjs`의 `exposeRhwpEditor`가 `createEditor` 결과를 창에 알려 준다).
+
+- **가리키기(멘션).** 틀 페이지가 `{source:'process-gpt', type:'mention-mode', on}`을 보내 켜거나, ⌥(Alt)를 누른 채 클릭하면, 누른 대상을 `{type:'mention', mention}`으로 알린다.
+  - 워드: 표(번호·행·열·첫 줄), 그림(번호), 문단(블록 번호·글)
+  - 엑셀: 이름 상자의 셀 범위
+  - 한글: 그림(번호), 표(번호·행·열 — 에이전트 플러그인 `selection`·`readTable`로 찾음), 문단
+- **한글 실시간 세션.** 한글 편집기는 자체 MCP 다리가 없어서, 페이지가 host의 `hwp:mcp-command`에 편집기 에이전트 플러그인으로 답한다(`LIVE_EDITORS`에 `hwp`). 도구:
+  - `office_live_read`(한글: 본문·표 목록·그림 목록)
+  - `office_live_hwp_table`(read·fill·add_rows·remove_rows)
+  - `office_live_hwp_text`(replace·insert)
+- **그림 왕복.** 틀 페이지가 `{type:'hwp-picture', n, requestId}`로 그림 N의 바이트를 받고, `{type:'hwp-replace-picture', n, bytes}`로 새 바이트를 넘긴다.
+  - 문서를 hwpx로 내보내 `BinData/` 그 그림만 바꾸고, 같은 이름으로 다시 연다. 스크롤 위치는 지킨다.
+  - pgpt-pro는 이것으로 "@이미지 1 색을 바꿔 줘"를 포토크래프트에서 고친 뒤 제자리에 넣는다.
+- **엑셀 폭.** AI 패널을 숨기면 `.sheet-body` 그리드가 한 칸이 되어 시트가 전체 폭을 쓴다.
+
 `ops`는 연산 객체의 배열이다. 에이전트가 배열을 JSON 문자열로 보내는 일이 있어서 둘 다 받는다(타입 없는 스키마에서는 실제로 문자열로 왔다).
 
 여러 곳을 블록 번호로 바꾸면 앞의 변경이 뒤의 번호를 민다. 실제로 이 때문에 에이전트가 제목을 덮어쓴 일이 있어서, `match_text`를 넣고 도구 설명에 "뒤에서부터 바꾸거나 다시 읽기"를 적었다.
