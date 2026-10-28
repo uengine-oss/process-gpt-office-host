@@ -217,6 +217,7 @@ installPageLive({
   ipcRenderer,
   toParent,
   assistantParent: params.get('assistant') === 'parent' && window.parent !== window,
+  pageLang,
 })
 
 export const contextBridge = {

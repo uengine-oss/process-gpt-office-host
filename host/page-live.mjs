@@ -9,8 +9,16 @@
 // - 한글 live session: the 한글 editor has no MCP bridge of its own, so this page answers the
 //   host's `hwp:mcp-command` (live.mjs) with the editor's agent plugin (tables, text) and its
 //   document bytes; the host's office_live_* tools reach the open 한글 document through it.
-// - Pictures (한글): the parent asks for picture N's bytes (to edit it in another app) and later
-//   hands back new bytes; the document is rewritten with only that picture changed and reloaded.
+// - Pictures (한글, 워드): the parent asks for picture N's bytes (to edit it in another app) and later
+//   hands back new bytes. 한글: the document is rewritten with only that picture changed and
+//   reloaded. 워드: the picture's node takes the new bytes the way the ribbon's 「그림 바꾸기」 does
+//   (imageReplace — the drawing, its place, size and wrap stay; saving writes the new bytes).
+// - Words the page itself writes (mention chips, errors) follow the page's `lang=en|ko`, like the
+//   editors' own UI (electron-renderer-shim.mjs); without it, Korean as before.
+
+// ---------------------------------------------------------------- the page's language
+let lang = 'ko'
+const L = (ko, en) => (lang === 'en' ? en : ko)
 
 // ---------------------------------------------------------------- zip (hwpx is a zip)
 const CRC = (() => {
@@ -121,11 +129,11 @@ async function hwpPictures(entries) {
 }
 async function hwpPicture(n) {
   const ed = hwpEditor()
-  if (!ed) throw new Error('한글 편집기가 아직 열리지 않았습니다')
+  if (!ed) throw new Error(L('한글 편집기가 아직 열리지 않았습니다', 'The Hangul editor is not open yet'))
   const entries = await unzip(await ed.exportHwpx())
   const pics = await hwpPictures(entries)
   const pic = pics[(n || 1) - 1]
-  if (!pic) throw new Error(`그림 ${n} 이 문서에 없습니다(그림 ${pics.length}개)`)
+  if (!pic) throw new Error(L(`그림 ${n} 이 문서에 없습니다(그림 ${pics.length}개)`, `Picture ${n} is not in the document (${pics.length} picture${pics.length === 1 ? '' : 's'})`))
   return { entries, pic, count: pics.length }
 }
 /** picture N's bytes, to be edited elsewhere */
@@ -164,6 +172,103 @@ export async function hwpReplacePicture(n, bytes, fileName) {
   return { replaced: pic.n, bytes: out.length }
 }
 
+// ---------------------------------------------------------------- 워드: its pictures
+// tiptap puts the editor on its root element; the document's pictures are its image nodes, in order:
+// block pictures (docProtected, blockType 'image' — a picture on its own line) and inline ones
+const docsEditor = () => document.querySelector('.ProseMirror')?.editor || null
+function docsPictures(ed) {
+  const out = []
+  ed.state.doc.descendants((node, pos) => {
+    if (node.type.name === 'docProtected' && node.attrs.blockType === 'image') out.push({ n: out.length + 1, pos, node, src: node.attrs.imageDataUrl || '' })
+    else if (node.type.name === 'docInlineImage' && node.attrs.dataUrl && !node.attrs.rule) out.push({ n: out.length + 1, pos, node, src: node.attrs.dataUrl, inline: true })
+  })
+  return out
+}
+/** the picture a clicked <img> shows: its number among docsPictures */
+function docsPictureOf(ed, img) {
+  for (const p of docsPictures(ed)) {
+    const dom = ed.view.nodeDOM(p.pos)
+    if (dom && (dom === img || dom.contains?.(img))) return p.n
+  }
+  return null
+}
+function docsPicture(n) {
+  const ed = docsEditor()
+  if (!ed) throw new Error(L('워드 편집기가 아직 열리지 않았습니다', 'The Word editor is not open yet'))
+  const pics = docsPictures(ed)
+  const pic = pics[(n || 1) - 1]
+  if (!pic) throw new Error(L(`그림 ${n} 이 문서에 없습니다(그림 ${pics.length}개)`, `Picture ${n} is not in the document (${pics.length} picture${pics.length === 1 ? '' : 's'})`))
+  return { ed, pic, count: pics.length }
+}
+const MEDIA_EXT = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif' }
+/** picture N's bytes: its data URL, or what the page shows (a picture served from the file) */
+export async function docsPictureBytes(n) {
+  const { ed, pic, count } = docsPicture(n)
+  let src = pic.src
+  if (!/^data:|^genoffice-|^https?:|^blob:|^\//.test(src)) src = ed.view.nodeDOM(pic.pos)?.querySelector?.('img')?.src || src
+  let bytes
+  const data = /^data:[^;,]*;base64,(.*)$/s.exec(src)
+  if (data) {
+    // decoded here: the editor page's CSP does not let fetch() read data: URLs
+    const bin = atob(data[1])
+    bytes = new Uint8Array(bin.length)
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+  } else {
+    // window.fetch maps the editor's genoffice-* scheme to the host (electron-renderer-shim.mjs)
+    const res = await fetch(src)
+    if (!res.ok) throw new Error(L(`그림 ${pic.n} 을 읽지 못했습니다(${res.status})`, `Could not read picture ${pic.n} (${res.status})`))
+    bytes = new Uint8Array(await res.arrayBuffer())
+  }
+  const png = bytes[0] === 0x89 && bytes[1] === 0x50
+  const gif = bytes[0] === 0x47 && bytes[1] === 0x49
+  const media = png ? 'image/png' : gif ? 'image/gif' : 'image/jpeg'
+  return { n: pic.n, count, name: `image${pic.n}.${MEDIA_EXT[media]}`, media, bytes }
+}
+const dataUrlOf = async (bytes, media) => {
+  const url = await new Promise((resolve, reject) => {
+    const r = new FileReader()
+    r.onload = () => resolve(String(r.result))
+    r.onerror = () => reject(r.error)
+    r.readAsDataURL(new Blob([bytes], { type: media }))
+  })
+  return url
+}
+const naturalSize = (url) => new Promise((resolve, reject) => {
+  const im = new Image()
+  im.onload = () => resolve({ width: im.naturalWidth, height: im.naturalHeight })
+  im.onerror = () => reject(new Error('the new picture does not decode'))
+  im.src = url
+})
+/** put new bytes in place of picture N: same place, same width (height follows the new picture) */
+export async function docsReplacePicture(n, bytes) {
+  const { ed, pic } = docsPicture(n)
+  const data = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes)
+  const png = data[0] === 0x89 && data[1] === 0x50
+  const gif = data[0] === 0x47 && data[1] === 0x49
+  const media = png ? 'image/png' : gif ? 'image/gif' : 'image/jpeg'
+  const url = await dataUrlOf(data, media)
+  const natural = await naturalSize(url)
+  const a = pic.node.attrs
+  let attrs
+  if (pic.inline) {
+    // an inline picture saves its drawing XML as it was: only the block form can take new bytes
+    throw new Error(L('글 줄 안에 든 그림은 아직 바꿀 수 없습니다(그림을 따로 한 줄에 두면 돼요)', 'A picture inside a line of text cannot be replaced yet (put the picture on its own line)'))
+  } else {
+    const w = Math.max(1, Math.round(Number(a.imageWidthPx) || Math.min(natural.width, 620)))
+    const h = Math.max(1, Math.round((w * natural.height) / natural.width))
+    const base64 = url.slice(url.indexOf(',') + 1)
+    const original = a.docxIndex !== null && a.docxIndex !== undefined
+    // as Ribbon.tsx applyPictureBytes: an original picture keeps its drawing (imageReplace), a new one
+    // its pending payload (genImage); the crop window of the old bytes would clip the new ones
+    attrs = {
+      ...a, imageDataUrl: url, imageWidthPx: w, imageHeightPx: h, imageCrop: null, imageFillRect: null,
+      ...(original ? { imageReplace: { base64, mime: media } } : { genImage: { base64, mime: media, widthPx: w, heightPx: h } }),
+    }
+  }
+  ed.view.dispatch(ed.state.tr.setNodeMarkup(pic.pos, undefined, attrs))
+  return { replaced: pic.n, bytes: data.length }
+}
+
 // the host's live commands for an open 한글 document (worker-mcp.mjs office_live_* → live.mjs)
 const HWP_COMMANDS = {
   read_document: async () => ({ text: String(await agent('readText')).slice(0, 60_000), tables: await agent('listTables'), pictures: (await hwpPictures(await unzip(await hwpEditor().exportHwpx()))).map(({ n, path }) => ({ n, path })) }),
@@ -183,8 +288,8 @@ function hwpLiveBridge(ipcRenderer) {
     const { requestId, command, payload } = msg || {}
     try {
       const fn = HWP_COMMANDS[command]
-      if (!fn) throw new Error(`한글 편집기가 모르는 명령: ${command}`)
-      if (!hwpEditor()) throw new Error('한글 편집기가 아직 열리지 않았습니다')
+      if (!fn) throw new Error(L(`한글 편집기가 모르는 명령: ${command}`, `Command unknown to the Hangul editor: ${command}`))
+      if (!hwpEditor()) throw new Error(L('한글 편집기가 아직 열리지 않았습니다', 'The Hangul editor is not open yet'))
       ipcRenderer.send('hwp:mcp-result', { requestId, ok: true, result: await fn(payload || {}) })
     } catch (err) {
       ipcRenderer.send('hwp:mcp-result', { requestId, ok: false, error: String(err?.message || err) })
@@ -217,8 +322,10 @@ function docsMention(target) {
   const blockIndex = blocks.indexOf(block)
   const img = target.closest('img')
   if (img) {
-    const n = [...root.querySelectorAll('img')].indexOf(img) + 1
-    return { kind: 'image', image: n, blockIndex, label: `이미지 ${n}` }
+    // numbered like docsPictures (the picture round trip finds it by that number)
+    const ed = root.editor
+    const n = (ed && docsPictureOf(ed, img)) || [...root.querySelectorAll('img')].indexOf(img) + 1
+    return { kind: 'image', image: n, blockIndex, label: L(`이미지 ${n}`, `Image ${n}`) }
   }
   if (block.tagName === 'TABLE' || target.closest('table')) {
     const table = target.closest('table')
@@ -227,10 +334,10 @@ function docsMention(target) {
     const row = cell ? cell.parentElement.rowIndex + 1 : null
     const col = cell ? cell.cellIndex + 1 : null
     const head = clip([...(table.rows[0]?.cells || [])].map((c) => c.innerText).join(' · '), 30)
-    return { kind: 'table', table: n, blockIndex, row, col, cellText: clip(cell?.innerText, 40), anchor: head, label: `표 ${n}${head ? ` (${clip(head, 14)})` : ''}` }
+    return { kind: 'table', table: n, blockIndex, row, col, cellText: clip(cell?.innerText, 40), anchor: head, label: `${L('표', 'Table')} ${n}${head ? ` (${clip(head, 14)})` : ''}` }
   }
   const text = clip(block.innerText, 60)
-  return { kind: 'paragraph', blockIndex, anchor: text, label: `문단 "${clip(text, 12)}"` }
+  return { kind: 'paragraph', blockIndex, anchor: text, label: `${L('문단', 'Paragraph')} "${clip(text, 12)}"` }
 }
 
 /** 엑셀 (Univer): the selection in the name box, on the active sheet */
@@ -261,7 +368,7 @@ async function hwpMention() {
     } catch {
       // keep the first
     }
-    return { kind: 'image', image: n, page, label: `이미지 ${n}` }
+    return { kind: 'image', image: n, page, label: L(`이미지 ${n}`, `Image ${n}`) }
   }
   // a word at the caret gives the caret's place (paragraph, or table cell path)
   await ed.commands.execute('ext:ieum-select-word').catch(() => null)
@@ -275,12 +382,12 @@ async function hwpMention() {
       const read = await agent('readTable', t.table, null)
       const cell = read?.cells?.[cellIndex]
       if (cell && String(cell.text).includes(seg.text)) {
-        return { kind: 'table', table: t.table, row: cell.row, col: cell.col, cellText: clip(cell.text, 40), anchor: t.near || '', label: `표 ${t.table}${t.near ? ` (${clip(t.near.replace(/^\d+\.\s*/, ''), 14)})` : ''}` }
+        return { kind: 'table', table: t.table, row: cell.row, col: cell.col, cellText: clip(cell.text, 40), anchor: t.near || '', label: `${L('표', 'Table')} ${t.table}${t.near ? ` (${clip(t.near.replace(/^\d+\.\s*/, ''), 14)})` : ''}` }
       }
     }
-    return { kind: 'table', table: null, cellText: seg.text, label: '표' }
+    return { kind: 'table', table: null, cellText: seg.text, label: L('표', 'Table') }
   }
-  return { kind: 'paragraph', para: seg.para, anchor: seg.text, label: `문단 "${clip(seg.text, 12)}"` }
+  return { kind: 'paragraph', para: seg.para, anchor: seg.text, label: `${L('문단', 'Paragraph')} "${clip(seg.text, 12)}"` }
 }
 
 function installMentions(editor, toParent) {
@@ -317,11 +424,15 @@ function installMentions(editor, toParent) {
 }
 
 // ---------------------------------------------------------------- requests from the parent
-function installParentRequests(toParent) {
+function installParentRequests(editor, toParent) {
   window.addEventListener('message', async (event) => {
     if (event.source !== window.parent || event.data?.source !== 'process-gpt') return
     const { type, requestId } = event.data
-    const run = { 'hwp-picture': () => hwpPictureBytes(event.data.n), 'hwp-replace-picture': () => hwpReplacePicture(event.data.n, event.data.bytes, event.data.name) }[type]
+    const { n, bytes, name } = event.data
+    const run = editor === 'docs'
+      ? { 'picture': () => docsPictureBytes(n), 'replace-picture': () => docsReplacePicture(n, bytes) }[type]
+      // 'hwp-*': the names before 워드 pictures, still answered
+      : { 'picture': () => hwpPictureBytes(n), 'replace-picture': () => hwpReplacePicture(n, bytes, name), 'hwp-picture': () => hwpPictureBytes(n), 'hwp-replace-picture': () => hwpReplacePicture(n, bytes, name) }[type]
     if (!run) return
     try {
       toParent('reply', { requestId, ok: true, result: await run() })
@@ -331,8 +442,11 @@ function installParentRequests(toParent) {
   })
 }
 
-export function installPageLive({ editor, ipcRenderer, toParent, assistantParent }) {
+export function installPageLive({ editor, ipcRenderer, toParent, assistantParent, pageLang }) {
+  if (pageLang === 'en' || pageLang === 'ko') lang = pageLang
   if (editor === 'hwp') hwpLiveBridge(ipcRenderer)
   if (assistantParent && ['docs', 'sheets', 'hwp'].includes(editor)) installMentions(editor, toParent)
-  if (assistantParent && editor === 'hwp') installParentRequests(toParent)
+  if (assistantParent && ['docs', 'hwp'].includes(editor)) installParentRequests(editor, toParent)
+  // the framing page asks which requests this page answers ('pictures': 'picture' / 'replace-picture')
+  if (assistantParent) toParent('page-live', { pictures: ['docs', 'hwp'].includes(editor) })
 }
