@@ -6,6 +6,10 @@ import { decode, encode } from './wire.mjs'
 import { installPageLive } from './page-live.mjs'
 
 const params = new URLSearchParams(location.search)
+// The editor's UI language for this page: the framing page passes its own (`lang=en|ko`, Process GPT
+// Lite's English mode), so two people in different languages share one host. The editors ask for it
+// through 'app:get-language', answered here; without the parameter the host's IEUM_LANG answers as before.
+const pageLang = /^(en|ko)$/.test(params.get('lang') || '') ? params.get('lang') : null
 // the host sits one level above the editor page (/office/<editor>/ → /office/);
 // in the Vite dev setup the page is at / and this resolves to / as well
 const hostBase = new URL('../', location.href)
@@ -170,6 +174,7 @@ new MutationObserver((records) => {
 
 export const ipcRenderer = {
   invoke(channel, ...args) {
+    if (pageLang && channel === 'app:get-language') return Promise.resolve(pageLang)
     const id = nextId++
     return new Promise((resolve, reject) => {
       pending.set(id, { resolve, reject })
