@@ -74,17 +74,27 @@ Process GPT (Vue 3)                                   office-host (Node 22, 컨�
 - 내장 AI 패널(`.ai-dock`·`.copilot`·크기 조절 손잡이)을 숨기고,
 - AI 버튼(`AI 도우미`·AI 레일·`AI 요약`·`AI 다듬기`·`AI 서식 정리`·`AI 분석`·`AI 검사` 등 `.ai-entry`)의 클릭을 가로채
 - 부모에게 `{ source: 'ieum-office', type: 'assistant', label, prompt, selection }`을 보낸다. `prompt`는 버튼에 맞는 요청 문장(선택한 글이 있으면 선택 기준), `AI 도우미`처럼 "도우미를 열어라"이면 `null`이다.
+- 워드에서 글을 고르면 뜨는 「AI 수정 요청」(과 그 창)도 숨긴다. 그 창의 「지금 보내기」·「대기열에 추가」는 숨긴 도크의 AI로만 가서, 틀 페이지의 채팅에는 아무것도 남지 않았다(2026-11-25). 고른 부분은 아래 2.5의 `selection`으로 틀 페이지의 채팅에 간다. 편집기를 따로 열면(이 매개변수 없이) 그대로 있다.
 
 틀 페이지가 그 요청을 자기 채팅으로 보내거나 입력창을 연다. 주소에 없으면 지금처럼 편집기 자체 AI가 뜬다.
 
 ### 2.5 가리켜서 말하기, 한글 실시간 편집, 그림 왕복 (`host/page-live.mjs`)
 
-`assistant=parent` 페이지에서는 세 가지가 더 붙는다. 포크 소스는 그대로다(한글 편집기 객체는 `build-web.mjs`의 `exposeRhwpEditor`가 `createEditor` 결과를 창에 알려 준다).
+`assistant=parent` 페이지에서는 네 가지가 더 붙는다. 포크 소스는 그대로다(한글 편집기 객체는 `build-web.mjs`의 `exposeRhwpEditor`가 `createEditor` 결과를 창에 알려 준다).
 
 - **가리키기(멘션).** 틀 페이지가 `{source:'process-gpt', type:'mention-mode', on}`을 보내 켜거나, ⌥(Alt)를 누른 채 클릭하면, 누른 대상을 `{type:'mention', mention}`으로 알린다.
   - 워드: 표(번호·행·열·첫 줄), 그림(번호), 문단(블록 번호·글)
   - 엑셀: 이름 상자의 셀 범위
   - 한글: 그림(번호), 표(번호·행·열 — 에이전트 플러그인 `selection`·`readTable`로 찾음), 문단
+- **고른 부분(워드).** 문서에서 고른 것이 바뀔 때마다 `{type:'selection', selection}`을 보낸다(고른 것이 없으면 `null`). `selection`에는 다음이 들어 있다.
+  - `label`: 자리. 「표 1 · 3행 2열」, 「문단」, 「문단 2개」, 「이미지 1」
+  - `text`: 고른 글
+  - `blockIndex`·`blockEnd`: 맨 위 블록 번호. `office_live_read`의 번호와 같다
+  - `table`: 표 번호(1부터)
+  - `range {row, col, rowEnd, colEnd}`: 표 칸 범위. 표 연산(`setTableCellFormat` 등)이 세는 0부터의 격자이고 합친 칸도 같다
+  - `from`·`to`: 문서 위치. 연산 target 의 `range`에 쓴다
+
+  칸 선택(CellSelection)이면 그 칸들만 센다. 틀 페이지는 이것을 채팅 입력창의 칩으로 보인다. 에이전트는 그 자리를 `office_live_apply_ops`의 target 으로 쓴다. 예: `{"op":"setTableCellFormat","target":{"nodeType":"table","blockIndexes":[2]},"range":{"row":2,"col":1},"vAlign":"center"}`. 시험은 `node --test host/page-live.test.mjs`다.
 - **한글 실시간 세션.** 한글 편집기는 자체 MCP 다리가 없어서, 페이지가 host의 `hwp:mcp-command`에 편집기 에이전트 플러그인으로 답한다(`LIVE_EDITORS`에 `hwp`). 도구:
   - `office_live_read`(한글: 본문·표 목록·그림 목록)
   - `office_live_hwp_table`(read·fill·add_rows·remove_rows)
