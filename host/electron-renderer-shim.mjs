@@ -101,6 +101,7 @@ window.addEventListener('message', (event) => {
 // document through office_live_*) asks for `?assistant=parent`. Then the editor's AI dock stays
 // hidden and its AI buttons — the 도우미 entry, its rail, the one-click presets — ask the page
 // instead: { type: 'assistant', label, prompt?, selection? }. prompt is null for "open the assistant".
+// The 워드 editor's 「AI 수정 요청」 on a selection stays hidden too: the page's chat carries the selection.
 const PRESET_PROMPTS = [
   [/요약/, (sel) => (sel ? '선택한 내용을 요약해 주세요' : '이 문서의 주요 내용과 핵심 사항을 요약해 주세요')],
   [/다듬/, (sel) => (sel ? '선택한 내용을 다듬어 더 명확하고 매끄럽게 만들어 주세요' : '문서 전체를 다듬어 더 명확하고 매끄럽게 만들어 주세요')],
@@ -116,6 +117,9 @@ function useParentAssistant() {
   // the sheets editor lays its AI panel out as the first column of .sheet-body's grid: one column without it
   style.textContent =
     '.ai-dock, .copilot, .ai-panel-resizer, .expand-copilot { display: none !important; }' +
+    // the 워드 editor's floating 「AI 수정 요청」 on a selection (and its popover) ran the hidden dock's AI: the
+    // selection goes to the page's chat instead (page-live.mjs 'selection'), so the request is made there
+    ' .ai-ask-trigger, .ai-ask-pop { display: none !important; }' +
     ' .sheet-body { grid-template-columns: minmax(0, 1fr) !important; } .sheet-body > .sheet-main { margin-left: 0 !important; }'
   ;(document.head || document.documentElement).appendChild(style)
   window.addEventListener(

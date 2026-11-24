@@ -6,6 +6,11 @@
 //   click on a table, an image, a paragraph (워드·한글) or a cell range (엑셀) is told to the parent
 //   as { type: 'mention', mention: { editor, kind, label, ...where } } — enough for the live tools
 //   to address the same object (table number and cell, picture number, range, text anchor).
+// - The selection, live (워드, `?assistant=parent`): what is selected in the document is told to the
+//   parent as it changes — { type: 'selection', selection: { editor, kind, label, text, ...where } },
+//   null when nothing is — so the parent's chat carries it (the chip in its composer takes the place
+//   of the editor's own 「AI 수정 요청」, hidden there) and its agent addresses exactly that place with
+//   the live tools: the top-level block, and in a table the cells' grid range as the table ops take it.
 // - 한글 live session: the 한글 editor has no MCP bridge of its own, so this page answers the
 //   host's `hwp:mcp-command` (live.mjs) with the editor's agent plugin (tables, text) and its
 //   document bytes; the host's office_live_* tools reach the open 한글 document through it.
@@ -423,6 +428,102 @@ function installMentions(editor, toParent) {
   }
 }
 
+// ---------------------------------------------------------------- the selection, live (워드)
+// A table's cells on its grid, the way the table ops count them (prosemirror-tables' TableMap): each cell
+// (by its offset from the table's content start) → its rows and columns, 0-based, a merged cell covering more.
+export function tableGrid(table) {
+  const cells = new Map()
+  const taken = []
+  table.forEach((row, rowOff, r) => {
+    let col = 0
+    row.forEach((cell, cellOff) => {
+      taken[r] ||= new Set()
+      while (taken[r].has(col)) col++
+      const cs = Math.max(1, Number(cell.attrs?.colspan) || 1)
+      const rs = Math.max(1, Number(cell.attrs?.rowspan) || 1)
+      for (let i = 0; i < rs; i++) { taken[r + i] ||= new Set(); for (let k = 0; k < cs; k++) taken[r + i].add(col + k) }
+      cells.set(rowOff + 1 + cellOff, { row: r, col, rowEnd: r + rs - 1, colEnd: col + cs - 1, node: cell })
+      col += cs
+    })
+  })
+  return cells
+}
+
+/** what is selected in the 워드 editor and where (enough for office_live_apply_ops to hit that place: the block, a table's
+ *  grid range, the positions), or null. `label` says where only — the parent shows the selected words beside it. */
+export function docsSelection(ed) {
+  const st = ed?.state
+  const sel = st?.selection
+  if (!sel || sel.empty) return null
+  const doc = st.doc
+  // a cell selection (prosemirror-tables) is its cells, not everything between its first and last one
+  const cellSel = typeof sel.forEachCell === 'function'
+  const parts = []
+  if (cellSel) sel.forEachCell((cell) => parts.push(cell.textContent))
+  const text = String(cellSel ? parts.join(' ') : doc.textBetween(sel.from, sel.to, ' ', ' ') || '').replace(/\s+/g, ' ').trim()
+  const $from = doc.resolve(sel.from)
+  const $to = doc.resolve(sel.to)
+  const blockIndex = $from.index(0)
+  // (a selection ending at the start of the next block does not reach into it)
+  const blockEnd = Math.max(blockIndex, sel.to > sel.from && $to.parentOffset === 0 && $to.depth === 1 ? $to.index(0) - 1 : $to.index(0))
+  const base = { editor: 'docs', text: text.slice(0, 2000), blockIndex, from: sel.from, to: sel.to }
+  const top = doc.maybeChild(blockIndex)
+  if (top?.type.name === 'docTable' && blockEnd === blockIndex) {
+    let tablePos = 0
+    let n = 0
+    doc.forEach((node, offset, i) => { if (i < blockIndex) tablePos = offset + node.nodeSize; if (i <= blockIndex && node.type.name === 'docTable') n++ })
+    const grid = tableGrid(top)
+    const hit = []
+    // a cell selection: its cells; a text selection: the cells it touches
+    if (cellSel) sel.forEachCell((_cell, pos) => { const g = grid.get(pos - tablePos - 1); if (g) hit.push(g) })
+    else {
+      for (const [rel, g] of grid) {
+        const abs = tablePos + 1 + rel
+        if (abs < sel.to && abs + g.node.nodeSize > sel.from) hit.push(g)
+      }
+    }
+    if (hit.length) {
+      const range = { row: Math.min(...hit.map((g) => g.row)), col: Math.min(...hit.map((g) => g.col)), rowEnd: Math.max(...hit.map((g) => g.rowEnd)), colEnd: Math.max(...hit.map((g) => g.colEnd)) }
+      const one = (a, b) => (a === b ? `${a + 1}` : `${a + 1}~${b + 1}`)
+      const where = L(`${one(range.row, range.rowEnd)}행 ${one(range.col, range.colEnd)}열`, `row ${one(range.row, range.rowEnd)}, col ${one(range.col, range.colEnd)}`)
+      return { ...base, kind: 'table', table: n, range, cells: hit.length, label: `${L('표', 'Table')} ${n} · ${where}` }
+    }
+  }
+  if (sel.node && sel.node.type.name === 'docProtected' && sel.node.attrs.blockType === 'image') {
+    const p = docsPictures(ed).find((x) => x.pos === sel.from)
+    if (p) return { ...base, kind: 'image', image: p.n, label: L(`이미지 ${p.n}`, `Image ${p.n}`) }
+  }
+  // (where only: the parent shows the selected words beside it)
+  return { ...base, kind: 'text', blockEnd, label: blockEnd > blockIndex ? L(`문단 ${blockEnd - blockIndex + 1}개`, `${blockEnd - blockIndex + 1} paragraphs`) : L('문단', 'Paragraph') }
+}
+
+function installSelection(toParent) {
+  const hooked = new WeakSet()
+  let last = 'null'
+  let timer = null
+  const tell = () => {
+    clearTimeout(timer)
+    timer = setTimeout(() => {
+      let s = null
+      try { s = docsSelection(docsEditor()) } catch { s = null }
+      // (the same place again is not news; positions alone moving under an edit are)
+      const key = JSON.stringify(s)
+      if (key === last) return
+      last = key
+      toParent('selection', { selection: s })
+    }, 180)
+  }
+  // the editor is made after the document loads (and again for another document): hook each one
+  setInterval(() => {
+    const ed = docsEditor()
+    if (!ed || hooked.has(ed)) return
+    hooked.add(ed)
+    ed.on('selectionUpdate', tell)
+    ed.on('update', tell)
+    tell()
+  }, 500)
+}
+
 // ---------------------------------------------------------------- requests from the parent
 function installParentRequests(editor, toParent) {
   window.addEventListener('message', async (event) => {
@@ -447,6 +548,8 @@ export function installPageLive({ editor, ipcRenderer, toParent, assistantParent
   if (editor === 'hwp') hwpLiveBridge(ipcRenderer)
   if (assistantParent && ['docs', 'sheets', 'hwp'].includes(editor)) installMentions(editor, toParent)
   if (assistantParent && ['docs', 'hwp'].includes(editor)) installParentRequests(editor, toParent)
+  if (assistantParent && editor === 'docs') installSelection(toParent)
   // the framing page asks which requests this page answers ('pictures': 'picture' / 'replace-picture')
-  if (assistantParent) toParent('page-live', { pictures: ['docs', 'hwp'].includes(editor) })
+  // and whether it tells its selection ('selection')
+  if (assistantParent) toParent('page-live', { pictures: ['docs', 'hwp'].includes(editor), selection: editor === 'docs' })
 }
