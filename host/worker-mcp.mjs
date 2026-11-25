@@ -26,7 +26,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { z } from 'zod'
 import { createContext, disposeContext, runJson } from '@ieum/packages/cli/src/mcp/run'
 import { bearerOf, verifyToken } from './auth.mjs'
-import { announce, runLive, sessionFor, sessionsOf } from './live.mjs'
+import { announce, runLive, sessionFor, sessionsOf, runPage } from './live.mjs'
 import {
   CONTENT_TYPES, editedObjectPath, hostDataRoot, isAllowedSource, newDocumentObject, safeName, storageAuth,
   storageObjectOf, uploadToStorage,
@@ -239,6 +239,33 @@ function buildServer(userToken, claims) {
   return server
 }
 
+/**
+ * 워드, after a live batch (page-live.mjs): cells whose vertical alignment the batch set get their edge spacing put where the
+ * alignment puts the text (`aligned` — through the editor's own ops, one more batch), then the page reads back what the
+ * document shows for each format op of the batch (`check`: cells' vAlign · fill · borders and where their text sits,
+ * paragraphs' fields and layout), so a caller can tell an accepted op from a change that took effect. Either step failing
+ * leaves the edit as it is and says so (`aligned.error`, `check_error`).
+ */
+async function docsAfterOps(c, ops, result) {
+  const out = { ...result }
+  try {
+    const plan = await runPage(c, 'cell_align_ops', { ops })
+    if (plan?.ops?.length) {
+      const more = await runLive(c, 'apply_ops', { ops: plan.ops })
+      out.aligned = { cells: plan.cells, paragraphs: plan.paragraphs, summary: more?.summary ?? null }
+      if (more?.mutated) out.mutated = true
+    }
+  } catch (err) {
+    out.aligned = { error: String(err?.message || err) }
+  }
+  try {
+    out.check = (await runPage(c, 'format_facts', { ops }))?.check ?? []
+  } catch (err) {
+    out.check_error = String(err?.message || err)
+  }
+  return out
+}
+
 /** tools on the documents the calling user has open right now (the edits show up in their editor) */
 function registerLiveTools(server, claims) {
   const live = async (sessionId, fn) => {
@@ -393,14 +420,18 @@ function registerLiveTools(server, claims) {
   server.registerTool(
     'office_live_apply_ops',
     {
-      description: '열린 문서에 편집 연산을 적용한다(워드 apply_ops, 엑셀 시트 연산). 연산 형식은 office_guide 참고.',
+      description:
+        '열린 문서에 편집 연산을 적용한다(워드 apply_ops, 엑셀 시트 연산). 연산 형식은 office_guide 참고. ' +
+        '워드: 칸 세로 정렬(setTableCellFormat vAlign)은 칸 높이를 그대로 두고 칸 안 문단의 위아래 간격을 옮겨 글을 그 자리에 놓는다(aligned). ' +
+        '결과의 check 에는 서식 연산마다 문서가 지금 보여 주는 것(칸: vAlign·fill·borders 와 글 위아래 남은 자리 above·below, 문단: 바꾼 값과 화면의 정렬·간격)이 온다 — 요청대로 됐는지는 그것으로 확인한다.',
       inputSchema: { session_id: z.string(), ops: OPS },
     },
     async ({ session_id, ops }) =>
       live(session_id, async (c) => {
         const list = opsList(ops)
         announce(c, { action: 'ops', text: `편집 ${list.length}건` })
-        return runLive(c, 'apply_ops', { ops: list })
+        const result = await runLive(c, 'apply_ops', { ops: list })
+        return c.editorName === 'docs' ? docsAfterOps(c, list, result) : result
       }),
   )
 

@@ -92,9 +92,16 @@ Process GPT (Vue 3)                                   office-host (Node 22, 컨�
   - `blockIndex`·`blockEnd`: 맨 위 블록 번호. `office_live_read`의 번호와 같다
   - `table`: 표 번호(1부터)
   - `range {row, col, rowEnd, colEnd}`: 표 칸 범위. 표 연산(`setTableCellFormat` 등)이 세는 0부터의 격자이고 합친 칸도 같다
-  - `from`·`to`: 문서 위치. 연산 target 의 `range`에 쓴다
+  - `from`·`to`: 문서 위치. 연산 target 의 `range`에 쓴다(칸 선택이면 첫 칸 하나만 가리킨다 — ProseMirror 의 Selection.from·to)
+  - `textRanges [{from, to}]`(표): 고른 칸을 행마다 덮는 문서 위치. 칸 안 글의 문단·글꼴 연산(`setParagraphFormat`·`setFont`)은 이것마다 하나씩 보낸다
 
   칸 선택(CellSelection)이면 그 칸들만 센다. 틀 페이지는 이것을 채팅 입력창의 칩으로 보인다. 에이전트는 그 자리를 `office_live_apply_ops`의 target 으로 쓴다. 예: `{"op":"setTableCellFormat","target":{"nodeType":"table","blockIndexes":[2]},"range":{"row":2,"col":1},"vAlign":"center"}`. 시험은 `node --test host/page-live.test.mjs`다.
+- **워드 서식 편집의 후처리(`office_live_apply_ops`, 워드).** 연산을 적용한 뒤 페이지에 두 가지를 요청한다(`docs:page-command`, `live.mjs`의 `runPage`).
+  - `cell_align_ops`: 이 배치에서 칸의 세로 정렬(`setTableCellFormat` `vAlign`)을 바꿨으면, 해당 칸의 가장자리 문단 간격(첫 문단의 위 간격 + 마지막 문단의 아래 간격, 화면에 표시된 값)을 정렬에 맞게 재배분하는 `setParagraphFormat` 연산을 만든다. 위쪽 정렬은 모두 아래로, 가운데 정렬은 위아래에 절반씩, 아래쪽 정렬은 모두 위로 배분한다. 간격의 합은 그대로이므로 칸 높이는 바뀌지 않는다. host는 이 연산을 편집기 연산으로 한 번 더 적용하고 결과에 `aligned {cells, paragraphs, summary}`를 붙인다.
+    근거: 운영 2026-11-25 12:57. python-docx 기본값으로 작성한 회의록에는 행 높이가 지정되어 있지 않았고, 칸의 각 문단에는 문서 기본 아래 간격(200 twips, 약 13px)이 있었다. 칸 내용이 칸을 꽉 채워 세로 가운데 정렬을 적용해도 글이 움직이지 않았다(Word도 동일하게 표시한다).
+  - `format_facts`: 서식 연산마다 문서에 현재 표시된 상태를 결과의 `check`에 담는다. 칸의 경우 `vAlign`·`fill`·`borders` 값, 화면의 `verticalAlign`·`background`, 글 위아래의 여유 공간(`above`·`below`)과 글의 줄 높이(`lines`)다. 문단의 경우 변경한 필드의 값, 화면의 `textAlign`과 위아래 간격이다. 호출하는 쪽(pgpt-pro `lib/officeEdits.js`)은 연산 개수가 아니라 이 정보로 요청이 문서에 반영되었는지 확인한다.
+  - 둘 중 하나가 실패해도 편집은 그대로 유지하고 `aligned.error`·`check_error`로 알린다. 테스트는 `node --test host/page-live.test.mjs`(`planCellAlign`·`formatFacts`·`textRanges`)다.
+- **AI 표시 숨김.** 편집기 브리지는 외부 편집을 곧바로 받아들이면서 노란 「AI 변경」 표시를 지우지만, 최상위 블록의 표시만 지운다. 따라서 표 칸 안의 문단에는 표시가 계속 남았다. 부모 모드에서는 이 표시를 CSS로 숨긴다(`electron-renderer-shim.mjs`). 포크에 보낼 수정은 `patches/ieumoffice-clear-nested-ai-marks.patch`다.
 - **한글 실시간 세션.** 한글 편집기는 자체 MCP 다리가 없어서, 페이지가 host의 `hwp:mcp-command`에 편집기 에이전트 플러그인으로 답한다(`LIVE_EDITORS`에 `hwp`). 도구:
   - `office_live_read`(한글: 본문·표 목록·그림 목록)
   - `office_live_hwp_table`(read·fill·add_rows·remove_rows)
