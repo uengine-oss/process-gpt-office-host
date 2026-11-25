@@ -1,0 +1,50 @@
+diff -ru a/apps/docs/src/renderer/ai/AiPanel.tsx b/apps/docs/src/renderer/ai/AiPanel.tsx
+--- a/apps/docs/src/renderer/ai/AiPanel.tsx
++++ b/apps/docs/src/renderer/ai/AiPanel.tsx
+@@ -720,16 +720,17 @@
+   const notesAccessRef = useRef(notesAccess)
+   notesAccessRef.current = notesAccess
+ 
+-  /** drop every aiChanged flag; silent = skip undo history (auto-accept path) */
++  /** drop every aiChanged flag (nested ones too: table-cell paragraphs); silent = skip undo history (auto-accept path) */
+   const clearAiHighlights = (silent = false) => {
+     const view = editorRef.current.view
+     let tr = view.state.tr
+     let touched = false
+-    view.state.doc.forEach((node, offset) => {
++    view.state.doc.descendants((node, pos) => {
+       if (node.attrs.aiChanged) {
+-        tr = tr.setNodeMarkup(offset, undefined, { ...node.attrs, aiChanged: false })
++        tr = tr.setNodeMarkup(pos, undefined, { ...node.attrs, aiChanged: false })
+         touched = true
+       }
++      return !node.isTextblock
+     })
+     if (silent) tr = tr.setMeta('addToHistory', false)
+     if (touched) {
+diff -ru a/apps/docs/src/renderer/mcp-bridge.ts b/apps/docs/src/renderer/mcp-bridge.ts
+--- a/apps/docs/src/renderer/mcp-bridge.ts
++++ b/apps/docs/src/renderer/mcp-bridge.ts
+@@ -47,16 +47,19 @@
+   dryRun?: boolean
+ }
+ 
+-/** mirror of AiPanel's clearAiHighlights: auto-accept the external edit, keeping undo history */
++/** mirror of AiPanel's clearAiHighlights: auto-accept the external edit, keeping undo history.
++ *  Every flagged node, not only top-level blocks: a paragraph op inside a table cell flags that cell's paragraph
++ *  (ops.ts changedAttrs), which kept its highlight for good when only the top level was cleared. */
+ function clearAiChangedFlags(editor: Editor): void {
+   const view = editor.view
+   let tr = view.state.tr
+   let touched = false
+-  view.state.doc.forEach((node, offset) => {
++  view.state.doc.descendants((node, pos) => {
+     if (node.attrs.aiChanged) {
+-      tr = tr.setNodeMarkup(offset, undefined, { ...node.attrs, aiChanged: false })
++      tr = tr.setNodeMarkup(pos, undefined, { ...node.attrs, aiChanged: false })
+       touched = true
+     }
++    return !node.isTextblock
+   })
+   if (!touched) return
+   tr = tr.setMeta('addToHistory', false)

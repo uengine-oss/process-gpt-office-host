@@ -16,13 +16,18 @@ for (const editor of LIVE_EDITORS) {
   ipcMain.on(`${editor}:mcp-ready`, (event) => {
     event.sender.mcpReady = true
   })
-  ipcMain.on(`${editor}:mcp-result`, (_event, result) => {
-    const call = result && pending.get(result.requestId)
-    if (!call) return
-    pending.delete(result.requestId)
-    clearTimeout(call.timer)
-    call.resolve(result)
-  })
+  ipcMain.on(`${editor}:mcp-result`, (_event, result) => settle(result))
+}
+// the page's own commands (page-live.mjs: 워드 cell alignment and what the document shows), on a channel beside the editor's bridge
+export const PAGE_EDITORS = new Set(['docs'])
+for (const editor of PAGE_EDITORS) ipcMain.on(`${editor}:page-result`, (_event, result) => settle(result))
+
+function settle(result) {
+  const call = result && pending.get(result.requestId)
+  if (!call) return
+  pending.delete(result.requestId)
+  clearTimeout(call.timer)
+  call.resolve(result)
 }
 
 /** a connection becomes a live session once its editor is open */
@@ -55,6 +60,16 @@ export function sessionFor(userSub, sessionId) {
 
 /** run one editor command in the live editor and wait for its answer */
 export function runLive(contents, command, payload, timeoutMs = 60_000) {
+  return ask(contents, `${contents.editorName}:mcp-command`, command, payload, timeoutMs)
+}
+
+/** run one of the page's own commands (page-live.mjs DOCS_COMMANDS) and wait for its answer */
+export function runPage(contents, command, payload, timeoutMs = 10_000) {
+  if (!PAGE_EDITORS.has(contents.editorName)) return Promise.reject(new Error(`no page commands for ${contents.editorName}`))
+  return ask(contents, `${contents.editorName}:page-command`, command, payload, timeoutMs)
+}
+
+function ask(contents, channel, command, payload, timeoutMs) {
   const requestId = randomUUID()
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -65,7 +80,7 @@ export function runLive(contents, command, payload, timeoutMs = 60_000) {
       timer,
       resolve: (result) => (result.ok ? resolve(result.result) : reject(new Error(result.error || '편집기가 명령을 거절했습니다'))),
     })
-    contents.send(`${contents.editorName}:mcp-command`, { requestId, command, payload })
+    contents.send(channel, { requestId, command, payload })
   })
 }
 

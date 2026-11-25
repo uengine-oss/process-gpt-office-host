@@ -120,6 +120,10 @@ function useParentAssistant() {
     // the 워드 editor's floating 「AI 수정 요청」 on a selection (and its popover) ran the hidden dock's AI: the
     // selection goes to the page's chat instead (page-live.mjs 'selection'), so the request is made there
     ' .ai-ask-trigger, .ai-ask-pop { display: none !important; }' +
+    // the editor's bridge takes a live edit as accepted at once and clears its yellow 「AI changed」 mark — on top-level blocks
+    // only, so a paragraph inside a table cell kept it for good (production 11-25: one cell of 회의록_템플릿.docx stayed yellow).
+    // The page's chat says what changed; no mark here (upstream fix: patches/ieumoffice-clear-nested-ai-marks.patch)
+    ' .doc-page .ai-changed { background: none !important; box-shadow: none !important; }' +
     ' .sheet-body { grid-template-columns: minmax(0, 1fr) !important; } .sheet-body > .sheet-main { margin-left: 0 !important; }'
   ;(document.head || document.documentElement).appendChild(style)
   window.addEventListener(

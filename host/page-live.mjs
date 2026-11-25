@@ -442,11 +442,27 @@ export function tableGrid(table) {
       const cs = Math.max(1, Number(cell.attrs?.colspan) || 1)
       const rs = Math.max(1, Number(cell.attrs?.rowspan) || 1)
       for (let i = 0; i < rs; i++) { taken[r + i] ||= new Set(); for (let k = 0; k < cs; k++) taken[r + i].add(col + k) }
-      cells.set(rowOff + 1 + cellOff, { row: r, col, rowEnd: r + rs - 1, colEnd: col + cs - 1, node: cell })
+      cells.set(rowOff + 1 + cellOff, { row: r, col, rowEnd: r + rs - 1, colEnd: col + cs - 1, node: cell, rel: rowOff + 1 + cellOff })
       col += cs
     })
   })
   return cells
+}
+
+/** The selected cells' contents as position ranges, one per table row: what a paragraph or font op (setParagraphFormat,
+ *  setFont: target.range) needs to reach every selected cell and nothing else. A cell selection's own from/to is one cell only
+ *  (ProseMirror's Selection.from/to are its first range): production 11-25, 「1~3행 1~4열」 selected, the agent's
+ *  setParagraphFormat with the selection's from/to changed one paragraph of ten. In a row the selected cells sit side by side
+ *  (a rectangle on the grid), so one range per row covers exactly them. hit: tableGrid entries (+ node), tablePos: the table's position */
+export function rowTextRanges(hit, tablePos) {
+  const rows = new Map()
+  for (const g of hit) {
+    const from = tablePos + 1 + g.rel
+    const to = from + g.node.nodeSize
+    const r = rows.get(g.row)
+    rows.set(g.row, r ? { from: Math.min(r.from, from), to: Math.max(r.to, to) } : { from, to })
+  }
+  return [...rows.entries()].sort((a, b) => a[0] - b[0]).map(([, r]) => r)
 }
 
 /** what is selected in the 워드 editor and where (enough for office_live_apply_ops to hit that place: the block, a table's
@@ -486,7 +502,7 @@ export function docsSelection(ed) {
       const range = { row: Math.min(...hit.map((g) => g.row)), col: Math.min(...hit.map((g) => g.col)), rowEnd: Math.max(...hit.map((g) => g.rowEnd)), colEnd: Math.max(...hit.map((g) => g.colEnd)) }
       const one = (a, b) => (a === b ? `${a + 1}` : `${a + 1}~${b + 1}`)
       const where = L(`${one(range.row, range.rowEnd)}행 ${one(range.col, range.colEnd)}열`, `row ${one(range.row, range.rowEnd)}, col ${one(range.col, range.colEnd)}`)
-      return { ...base, kind: 'table', table: n, range, cells: hit.length, label: `${L('표', 'Table')} ${n} · ${where}` }
+      return { ...base, kind: 'table', table: n, range, cells: hit.length, textRanges: rowTextRanges(hit, tablePos), label: `${L('표', 'Table')} ${n} · ${where}` }
     }
   }
   if (sel.node && sel.node.type.name === 'docProtected' && sel.node.attrs.blockType === 'image') {
@@ -524,6 +540,278 @@ function installSelection(toParent) {
   }, 500)
 }
 
+// ---------------------------------------------------------------- cell alignment, and what the document shows (워드 live edits)
+// Production 11-25 (회의록_템플릿.docx, written with python-docx's defaults): 「1~3행 1~4열 … 중앙정렬」 → setTableCellFormat
+// vAlign center on ten cells, accepted, saved as w:vAlign center — and nothing moved on screen. Every cell paragraph carries the
+// document's default space after (w:pPrDefault, 200 twips ≈ 13px) and nothing else makes the rows tall, so a cell's content
+// (its line + that space) already fills the cell: centring it has no room to move. Word lays it out the same way. So, here,
+// without touching the fork:
+//   - planCellAlign: after a live batch sets cells' vertical alignment, each cell's edge spacing (its first paragraph's space
+//     before + its last paragraph's space after, as laid out) is put where the alignment puts the text — top: all after,
+//     center: half each, bottom: all before. The total stays, so the row keeps its height; the text moves as asked.
+//   - formatFacts: what the document shows after a batch, for each format op — cells: vAlign · fill · borders as the document
+//     has them, the cell's laid-out alignment and background, and where its text sits (room above and below its lines, and
+//     the lines' height); paragraphs: the
+//     requested fields and the laid-out alignment and spacing — so a caller checks the request against the document itself
+//     instead of the op count (pgpt-pro lib/officeEdits.js).
+const PARAGRAPHS = new Set(['docParagraph', 'docHeading', 'docListItem'])
+const SAME_TWIPS = 10 // spacing this close (half a point) is already where it should be
+const MAX_FACTS = 80
+
+function topBlocks(doc) {
+  const out = []
+  doc.forEach((node, pos, index) => out.push({ node, pos, index }))
+  return out
+}
+const hasText = (node, text, matchCase) =>
+  matchCase === false ? node.textContent.toLowerCase().includes(String(text).toLowerCase()) : node.textContent.includes(String(text))
+
+/** the one native table a table op's target names (blockIndexes · containsText, as the table ops take it) → { node, pos, index, n }, or null */
+export function opTable(doc, target) {
+  const t = target || {}
+  const hits = []
+  let n = 0
+  for (const b of topBlocks(doc)) {
+    if (b.node.type.name !== 'docTable') continue
+    n++
+    if (Array.isArray(t.blockIndexes) && !t.blockIndexes.includes(b.index)) continue
+    if (t.containsText != null && !hasText(b.node, t.containsText, t.matchCase)) continue
+    hits.push({ ...b, n })
+  }
+  return hits.length === 1 ? hits[0] : null
+}
+
+/** the cells a grid range touches (omitted: the whole table), each once, as the table ops take a range → [{ ...grid entry, pos }] */
+export function cellsInRange(table, tablePos, range) {
+  const top = range?.row ?? 0
+  const left = range?.col ?? 0
+  const bottom = range ? (range.rowEnd ?? range.row) : Infinity
+  const right = range ? (range.colEnd ?? range.col) : Infinity
+  const out = []
+  for (const g of tableGrid(table).values()) {
+    if (g.rowEnd < top || g.row > bottom || g.colEnd < left || g.col > right) continue
+    out.push({ ...g, pos: tablePos + 1 + g.rel })
+  }
+  return out
+}
+
+/** the paragraphs a paragraph op's target reaches (as the ops' matchTarget · paragraphsIn take blockIndexes · nodeType ·
+ *  containsText · range), or null for a target this page does not resolve the same way (the live selection, a heading level) */
+export function opParagraphs(doc, target) {
+  const t = target || {}
+  if (t.scope === 'selection' || t.headingLevel != null || t.nodeType === 'image') return null
+  const r = t.range && Number.isInteger(t.range.from) && Number.isInteger(t.range.to) ? t.range : null
+  const meets = (pos, end) => !r || (end > r.from && pos < r.to) || (r.from === r.to && r.from >= pos && r.from <= end)
+  const out = []
+  for (const b of topBlocks(doc)) {
+    if (Array.isArray(t.blockIndexes) && !t.blockIndexes.includes(b.index)) continue
+    if (t.nodeType && b.node.type.name !== (t.nodeType === 'table' ? 'docTable' : t.nodeType)) continue
+    if (t.containsText != null && !hasText(b.node, t.containsText, t.matchCase)) continue
+    if (!meets(b.pos, b.pos + b.node.nodeSize)) continue
+    if (b.node.isTextblock) {
+      if (PARAGRAPHS.has(b.node.type.name)) out.push({ node: b.node, pos: b.pos })
+      continue
+    }
+    b.node.descendants((node, offset) => {
+      if (!PARAGRAPHS.has(node.type.name)) return true
+      const pos = b.pos + 1 + offset
+      if (meets(pos, pos + node.nodeSize)) out.push({ node, pos })
+      return false
+    })
+  }
+  return out
+}
+
+/** The paragraph ops that put each aligned cell's edge spacing where its alignment puts the text (see above), for a batch just
+ *  applied — the positions are the document's now. spacingOf({ node, pos }) → { before, after } in twips as laid out, or null.
+ *  Neighbouring paragraphs (no other paragraph between) that take the same values share one op: a row of one-line cells.
+ *  → { ops, cells, paragraphs } */
+export function planCellAlign(doc, ops, spacingOf) {
+  const marks = []
+  const seen = new Set()
+  let cells = 0
+  for (const op of ops || []) {
+    if (op?.op !== 'setTableCellFormat' || op.vAlign === undefined) continue
+    const t = opTable(doc, op.target)
+    if (!t) continue
+    const want = op.vAlign || 'top'
+    for (const cell of cellsInRange(t.node, t.pos, op.range)) {
+      if (seen.has(cell.pos)) continue
+      seen.add(cell.pos)
+      const kids = []
+      cell.node.forEach((node, offset) => kids.push({ node, pos: cell.pos + 1 + offset }))
+      const first = kids[0]
+      const last = kids[kids.length - 1]
+      if (!first || !PARAGRAPHS.has(first.node.type.name) || !PARAGRAPHS.has(last.node.type.name)) continue
+      const a = spacingOf(first)
+      const z = first === last ? a : spacingOf(last)
+      if (!a || !z) continue
+      const total = (a.before || 0) + (z.after || 0)
+      const before = want === 'bottom' ? total : want === 'center' ? Math.round(total / 2) : 0
+      const after = total - before
+      if (Math.abs(before - (a.before || 0)) < SAME_TWIPS && Math.abs(after - (z.after || 0)) < SAME_TWIPS) continue
+      cells++
+      if (first === last) marks.push({ block: t.index, pos: first.pos, size: first.node.nodeSize, spaceBefore: before, spaceAfter: after })
+      else {
+        marks.push({ block: t.index, pos: first.pos, size: first.node.nodeSize, spaceBefore: before })
+        marks.push({ block: t.index, pos: last.pos, size: last.node.nodeSize, spaceAfter: after })
+      }
+    }
+  }
+  const order = new Map()
+  let i = 0
+  doc.descendants((node, pos) => {
+    if (!PARAGRAPHS.has(node.type.name)) return true
+    order.set(pos, i++)
+    return false
+  })
+  marks.sort((x, y) => x.pos - y.pos)
+  const runs = []
+  for (const m of marks) {
+    const r = runs[runs.length - 1]
+    if (r && r.block === m.block && r.spaceBefore === m.spaceBefore && r.spaceAfter === m.spaceAfter && order.get(m.pos) === order.get(r.last) + 1) {
+      r.to = m.pos + m.size
+      r.last = m.pos
+    } else runs.push({ block: m.block, from: m.pos, to: m.pos + m.size, last: m.pos, spaceBefore: m.spaceBefore, spaceAfter: m.spaceAfter })
+  }
+  return {
+    ops: runs.map((r) => ({
+      op: 'setParagraphFormat',
+      target: { blockIndexes: [r.block], range: { from: r.from, to: r.to } },
+      ...(r.spaceBefore !== undefined ? { spaceBefore: r.spaceBefore } : {}),
+      ...(r.spaceAfter !== undefined ? { spaceAfter: r.spaceAfter } : {}),
+    })),
+    cells,
+    paragraphs: marks.length,
+  }
+}
+
+/** What the document shows for each format op of a batch: [{ op (its index), name, table?, block?, cells? | paragraphs? }].
+ *  shown: { cell(pos, node), paragraph(pos, node) } → what is laid out (the page's DOM; null when not on screen) */
+export function formatFacts(doc, ops, shown) {
+  const out = []
+  ;(ops || []).forEach((op, i) => {
+    if (op?.op === 'setTableCellFormat') {
+      const t = opTable(doc, op.target)
+      if (!t) return out.push({ op: i, name: op.op, cells: [] })
+      const cells = cellsInRange(t.node, t.pos, op.range).slice(0, MAX_FACTS).map((c) => ({
+        row: c.row, col: c.col, ...(c.rowEnd !== c.row ? { rowEnd: c.rowEnd } : {}), ...(c.colEnd !== c.col ? { colEnd: c.colEnd } : {}),
+        text: clip(c.node.textContent, 20),
+        vAlign: c.node.attrs.vAlign ?? null, fill: c.node.attrs.fill ?? null, borders: c.node.attrs.borders ?? null,
+        shown: shown.cell(c.pos, c.node),
+      }))
+      out.push({ op: i, name: op.op, table: t.n, block: t.index, cells })
+    } else if (op?.op === 'setParagraphFormat') {
+      const ps = opParagraphs(doc, op.target)
+      if (!ps) return
+      const keys = Object.keys(op).filter((k) => k !== 'op' && k !== 'target')
+      out.push({
+        op: i, name: op.op,
+        paragraphs: ps.slice(0, MAX_FACTS).map((p) => ({
+          text: clip(p.node.textContent, 20),
+          attrs: Object.fromEntries(keys.map((k) => [k, p.node.attrs[k] ?? null])),
+          shown: shown.paragraph(p.pos, p.node),
+        })),
+      })
+    }
+  })
+  return out
+}
+
+// ---- the same, laid out (the page's DOM)
+const px = (v) => parseFloat(v) || 0
+const r1 = (v) => Math.round(v * 10) / 10
+/** a computed colour → 'RRGGBB', null for none (transparent) */
+export function hexOfCss(color) {
+  const m = /rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)/.exec(String(color || ''))
+  if (!m || (m[4] !== undefined && Number(m[4]) === 0)) return null
+  return [m[1], m[2], m[3]].map((x) => Number(x).toString(16).padStart(2, '0')).join('').toUpperCase()
+}
+const domOf = (ed, pos) => {
+  const d = ed.view.nodeDOM(pos)
+  return d && d.nodeType === 1 ? d : null
+}
+/** a paragraph's spacing as laid out, in twips */
+const domSpacing = (ed) => ({ pos }) => {
+  const el = domOf(ed, pos)
+  if (!el) return null
+  const cs = getComputedStyle(el)
+  return { before: Math.round(px(cs.marginTop) * 15), after: Math.round(px(cs.marginBottom) * 15) }
+}
+function domShown(ed) {
+  return {
+    cell(pos, node) {
+      const td = domOf(ed, pos)
+      if (!td) return null
+      const cs = getComputedStyle(td)
+      const out = { verticalAlign: cs.verticalAlign, background: hexOfCss(cs.backgroundColor) }
+      // the box its text is laid out in: an exact-height row's clip box (or a rotated cell's), else the cell inside borders and padding
+      const inner = td.querySelector(':scope > .cell-clip, :scope > .cell-vert')
+      let top
+      let bottom
+      if (inner) ({ top, bottom } = inner.getBoundingClientRect())
+      else {
+        const r = td.getBoundingClientRect()
+        top = r.top + px(cs.borderTopWidth) + px(cs.paddingTop)
+        bottom = r.bottom - px(cs.borderBottomWidth) - px(cs.paddingBottom)
+      }
+      // where its text sits: the lines of its paragraphs that have text (their boxes, without their spacing)
+      let t = Infinity
+      let b = -Infinity
+      node.forEach((child, offset) => {
+        if (!PARAGRAPHS.has(child.type.name) || !child.textContent.trim()) return
+        const r = domOf(ed, pos + 1 + offset)?.getBoundingClientRect()
+        if (!r?.height) return
+        t = Math.min(t, r.top)
+        b = Math.max(b, r.bottom)
+      })
+      if (Number.isFinite(t)) Object.assign(out, { above: r1(t - top), below: r1(bottom - b), lines: r1(b - t) })
+      return out
+    },
+    paragraph(pos) {
+      const el = domOf(ed, pos)
+      if (!el) return null
+      const cs = getComputedStyle(el)
+      return { textAlign: cs.textAlign, spaceBefore: Math.round(px(cs.marginTop) * 15), spaceAfter: Math.round(px(cs.marginBottom) * 15) }
+    },
+  }
+}
+// after a batch: the editor's own re-layout (measurements, pagination) a frame or two later; a page in the background has no frames
+const settle = () => new Promise((resolve) => {
+  let done = false
+  const go = () => { if (!done) { done = true; resolve() } }
+  requestAnimationFrame(() => requestAnimationFrame(go))
+  setTimeout(go, 150)
+})
+
+// the host's own commands for an open 워드 document, beside the editor's bridge (worker-mcp.mjs office_live_apply_ops → live.mjs runPage)
+const DOCS_COMMANDS = {
+  cell_align_ops: async ({ ops }) => {
+    const ed = docsEditor()
+    if (!ed) throw new Error(L('워드 편집기가 아직 열리지 않았습니다', 'The Word editor is not open yet'))
+    await settle()
+    return planCellAlign(ed.state.doc, ops, domSpacing(ed))
+  },
+  format_facts: async ({ ops }) => {
+    const ed = docsEditor()
+    if (!ed) throw new Error(L('워드 편집기가 아직 열리지 않았습니다', 'The Word editor is not open yet'))
+    await settle()
+    return { check: formatFacts(ed.state.doc, ops, domShown(ed)) }
+  },
+}
+function docsLiveBridge(ipcRenderer) {
+  ipcRenderer.on('docs:page-command', async (_event, msg) => {
+    const { requestId, command, payload } = msg || {}
+    try {
+      const fn = DOCS_COMMANDS[command]
+      if (!fn) throw new Error(`unknown page command: ${command}`)
+      ipcRenderer.send('docs:page-result', { requestId, ok: true, result: await fn(payload || {}) })
+    } catch (err) {
+      ipcRenderer.send('docs:page-result', { requestId, ok: false, error: String(err?.message || err) })
+    }
+  })
+}
+
 // ---------------------------------------------------------------- requests from the parent
 function installParentRequests(editor, toParent) {
   window.addEventListener('message', async (event) => {
@@ -546,6 +834,7 @@ function installParentRequests(editor, toParent) {
 export function installPageLive({ editor, ipcRenderer, toParent, assistantParent, pageLang }) {
   if (pageLang === 'en' || pageLang === 'ko') lang = pageLang
   if (editor === 'hwp') hwpLiveBridge(ipcRenderer)
+  if (editor === 'docs' && ipcRenderer) docsLiveBridge(ipcRenderer)
   if (assistantParent && ['docs', 'sheets', 'hwp'].includes(editor)) installMentions(editor, toParent)
   if (assistantParent && ['docs', 'hwp'].includes(editor)) installParentRequests(editor, toParent)
   if (assistantParent && editor === 'docs') installSelection(toParent)
