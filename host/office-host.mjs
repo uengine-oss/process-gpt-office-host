@@ -24,6 +24,7 @@ import { handleWorkerMcp } from './worker-mcp.mjs'
 import { registerSession } from './live.mjs'
 import { staticHandler } from './static.mjs'
 import { findForkRoot } from './fork-root.mjs'
+import { beatFromHost } from './ipc-link.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url)) // host/dist
 const web = resolve(here, '../..')
@@ -85,6 +86,8 @@ const server = createServer(async (req, res) => {
 
 // ---- WebSocket: one editor tab per connection ----
 const wss = new WebSocketServer({ noServer: true, maxPayload: 256 * 1024 * 1024 })
+// (an 'error' nobody listens for is thrown, and would end the process — every open document with it)
+wss.on('error', (err) => console.warn('[web-host] websocket server:', err?.message || err))
 server.on('upgrade', (req, socket, head) => {
   if (!/^(?:\/office)?\/__ipc(\?|$)/.test(req.url ?? '')) return socket.destroy()
   wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req))
@@ -92,11 +95,18 @@ server.on('upgrade', (req, socket, head) => {
 
 wss.on('connection', (socket, req) => {
   const query = new URL(req.url, 'http://host').searchParams
+  const editor = query.get('editor') || ''
   const send = (frame) => socket.readyState === socket.OPEN && socket.send(JSON.stringify(frame))
   const contents = new HostWebContents((channel, args) => send({ t: 'event', channel, args: encode(args) }))
-  socket.on('close', () => contents.destroy())
+  // (a connection's fault — a frame it cannot read, the network — is that connection's: logged; ws closes it)
+  socket.on('error', (err) => console.warn(`[web-host] ${editor || '-'}: connection error:`, err?.message || err))
+  socket.on('close', (code) => {
+    if (code !== 1000 && code !== 1001 && code !== 1005) console.log(`[web-host] ${editor || '-'}: connection closed ${code}`)
+    contents.destroy()
+  })
+  // (from this side too: a background tab's own heartbeat is slowed by its browser — host/ipc-link.mjs)
+  beatFromHost(socket, send)
 
-  const editor = query.get('editor') || ''
   contents.ready = (async () => {
     contents.user = verifyToken(query.get('token'))
     contents.userToken = query.get('token') || null
@@ -116,10 +126,16 @@ wss.on('connection', (socket, req) => {
   })
 
   socket.on('message', async (data) => {
-    const frame = JSON.parse(String(data))
+    // (a frame that is not JSON is dropped — thrown here it would be a rejection nobody handles)
+    let frame
+    try { frame = JSON.parse(String(data)) } catch { return void console.warn(`[web-host] ${editor || '-'}: a frame that is not JSON, dropped`) }
+    // the page's heartbeat (host/ipc-link.mjs): it keeps the connection from going idle — answered, nothing else
+    if (frame.t === 'ping') return void send({ t: 'pong' })
     const reply = (value, error) => send({ t: 'reply', id: frame.id, ...(error ? { error } : { value: encode(value) }) })
     try {
       await contents.ready
+      // the page asks for the editor's last write to be sent up again (host/documents.mjs watchSaves)
+      if (frame.t === 'republish') return void contents.republish?.()
       if (frame.t === 'context') {
         contents.workContext = sanitizeContext(frame.context)
         if (contents.workContext) {
@@ -161,3 +177,11 @@ server.listen(PORT, () => {
 
 // the editors' exit hooks (sidecar shutdown) run on process exit; make signals end it
 for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => process.exit(0))
+// A promise that failed with nobody waiting for it belongs to one request of one tab: logged, the host goes on serving the others (Node's
+// default would end the process, and every open document with it). An exception nobody caught leaves the process in a state nobody
+// knows: logged, and the process ends cleanly (the exit hooks above run; its supervisor starts it again).
+process.on('unhandledRejection', (reason) => console.error('[web-host] unhandled rejection:', reason?.stack || reason))
+process.on('uncaughtException', (err, origin) => {
+  console.error(`[web-host] uncaught exception (${origin}):`, err?.stack || err)
+  process.exit(1)
+})

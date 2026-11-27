@@ -4,6 +4,7 @@
 // on = pushes from webContents.send on the host).
 import { decode, encode } from './wire.mjs'
 import { installPageLive } from './page-live.mjs'
+import { createLink } from './ipc-link.mjs'
 
 const params = new URLSearchParams(location.search)
 // The editor's UI language for this page: the framing page passes its own (`lang=en|ko`, Process GPT
@@ -56,14 +57,18 @@ const rewrite = (value) => {
 
 let socket
 let open
+let link
 const pending = new Map() // id -> { resolve, reject }
 const subscribers = new Map() // channel -> Set<listener>
 let nextId = 1
 
 function connect() {
   socket = new WebSocket(wsUrl)
-  open = new Promise((resolve) => socket.addEventListener('open', resolve, { once: true }))
-  void open.then(() => toParent('ready', { editor: typeof __IEUM_EDITOR__ === 'string' ? __IEUM_EDITOR__ : '' }))
+  // (a heartbeat keeps it from going idle; a frame for a closed socket is refused at once — host/ipc-link.mjs)
+  link = createLink(socket)
+  open = link.opened
+  // (republish: this host sends the editor's last write up again when the page asks — host/documents.mjs)
+  void open.then(() => toParent('ready', { editor: typeof __IEUM_EDITOR__ === 'string' ? __IEUM_EDITOR__ : '', republish: true }), () => {})
   socket.addEventListener('message', (message) => {
     const frame = JSON.parse(message.data)
     if (frame.t === 'reply') {
@@ -78,23 +83,26 @@ function connect() {
       subscribers.get(frame.channel)?.forEach((fn) => fn({ sender: ipcRenderer }, ...args))
     }
   })
-  socket.addEventListener('close', () => {
+  socket.addEventListener('close', (event) => {
     for (const call of pending.values()) call.reject(new Error('web host disconnected'))
     pending.clear()
-    toParent('closed', {})
+    // (the close code tells the page why: 1006 a connection cut, 1011 the host failed, 1001 the host going away)
+    toParent('closed', { code: event.code })
   })
 }
 connect()
 
-async function post(frame) {
-  await open
-  socket.send(JSON.stringify(frame))
+// resolves once sent; rejects when the connection is closed (never sent into a closed socket, where a request would wait for good)
+function post(frame) {
+  return link.send(frame)
 }
 
 // the framing page (process-gpt) sends the work item context for the editor's AI
 window.addEventListener('message', (event) => {
   if (event.source !== window.parent || event.data?.source !== 'process-gpt') return
-  if (event.data.type === 'context') void post({ t: 'context', context: event.data.context })
+  if (event.data.type === 'context') void post({ t: 'context', context: event.data.context }).catch(() => {})
+  // the editor's last write up again (its 저장 is off: it has nothing newer — an upload of it failed, or the page must see a save answered)
+  else if (event.data.type === 'republish') void post({ t: 'republish' }).catch(() => {})
 })
 
 // One assistant: a framing page with its own (process-gpt's chat, which edits this open
@@ -144,6 +152,17 @@ function useParentAssistant() {
 }
 if (params.get('assistant') === 'parent' && window.parent !== window) useParentAssistant()
 
+// The text editor (a .txt · .json in apps/markdown, CodeMirror) paints the line under the caret in an opaque colour above its selection,
+// which it draws behind the text: a selection on that line — Shift+→, Shift+End — was made (typing replaced it) but could not be seen
+// (Process GPT Lite, 2026-11-27). The line's colour is made see-through, in either theme; the fork's own fix is
+// patches/ieumoffice-plain-text-selection.patch.
+{
+  const style = document.createElement('style')
+  style.id = 'ieum-text-selection'
+  style.textContent = '.cm-editor .cm-line.cm-activeLine { background-color: rgba(127, 127, 127, .08) !important; }'
+  ;(document.head || document.documentElement).appendChild(style)
+}
+
 // The desktop app takes some shortcuts in the main process (before-input-event: the HWP
 // editor's Ctrl/⌘+S and +P, which its inner iframe would otherwise swallow). Forward
 // them, from this page and from same-origin frames inside it. The server's platform
@@ -156,7 +175,7 @@ const forwardShortcuts = (win) => {
       if (!(e.ctrlKey || e.metaKey) || e.altKey || e.repeat || !SHORTCUT_CODES.has(e.code)) return
       if (e.code === 'KeyS') e.preventDefault() // never the browser's "save page"
       const input = { type: 'keyDown', code: e.code, key: e.key, shift: e.shiftKey, control: true, meta: true, alt: false, isAutoRepeat: false }
-      void post({ t: 'input', input })
+      void post({ t: 'input', input }).catch(() => {})
     },
     true,
   )
@@ -186,11 +205,12 @@ export const ipcRenderer = {
     const id = nextId++
     return new Promise((resolve, reject) => {
       pending.set(id, { resolve, reject })
-      post({ t: 'invoke', id, channel, args: encode(args) })
+      // (the connection gone: the caller hears it now — the editor's save says it failed instead of 「저장 중…」 for good)
+      post({ t: 'invoke', id, channel, args: encode(args) }).catch((err) => { if (pending.delete(id)) reject(err) })
     })
   },
   send(channel, ...args) {
-    void post({ t: 'send', channel, args: encode(args) })
+    void post({ t: 'send', channel, args: encode(args) }).catch(() => {})
   },
   // a page cannot block on a socket; the few sync calls are fire-and-forget here
   sendSync(channel, ...args) {
