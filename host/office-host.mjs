@@ -117,6 +117,8 @@ wss.on('connection', (socket, req) => {
 
   socket.on('message', async (data) => {
     const frame = JSON.parse(String(data))
+    // the page's heartbeat (host/ipc-link.mjs): it keeps the connection from going idle — answered, nothing else
+    if (frame.t === 'ping') return void send({ t: 'pong' })
     const reply = (value, error) => send({ t: 'reply', id: frame.id, ...(error ? { error } : { value: encode(value) }) })
     try {
       await contents.ready

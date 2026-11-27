@@ -99,6 +99,8 @@ export const CONTENT_TYPES = {
   hwp: 'application/x-hwp',
   hwpx: 'application/hwp+zip',
   md: 'text/markdown; charset=utf-8',
+  // (a .txt the markdown editor saves: served as text, not as a download — production 11-27, a chat's TXT)
+  txt: 'text/plain; charset=utf-8',
   html: 'text/html; charset=utf-8',
   xmind: 'application/zip',
 }
@@ -164,6 +166,7 @@ async function publishSave(contents, file) {
   const bytes = readFileSync(file)
   const hash = createHash('sha256').update(bytes).digest('hex')
   if (hash === contents.savedHash) return
+  const before = contents.savedHash
   contents.savedHash = hash
   const name = basename(file)
   const ext = extname(name).slice(1).toLowerCase()
@@ -183,6 +186,8 @@ async function publishSave(contents, file) {
     contents.send('office:saved', { name, size: bytes.length, url })
   } catch (err) {
     console.warn(`[web-host] publishing ${name} failed:`, err?.stack || err)
+    // (not published: the next save of the same bytes tries again)
+    contents.savedHash = before
     contents.send('office:save-failed', { name, error: String(err?.message || err) })
   }
 }
