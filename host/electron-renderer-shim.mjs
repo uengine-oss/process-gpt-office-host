@@ -148,6 +148,17 @@ function useParentAssistant() {
 }
 if (params.get('assistant') === 'parent' && window.parent !== window) useParentAssistant()
 
+// The text editor (a .txt · .json in apps/markdown, CodeMirror) paints the line under the caret in an opaque colour above its selection,
+// which it draws behind the text: a selection on that line — Shift+→, Shift+End — was made (typing replaced it) but could not be seen
+// (Process GPT Lite, 2026-11-27). The line's colour is made see-through, in either theme; the fork's own fix is
+// patches/ieumoffice-plain-text-selection.patch.
+{
+  const style = document.createElement('style')
+  style.id = 'ieum-text-selection'
+  style.textContent = '.cm-editor .cm-line.cm-activeLine { background-color: rgba(127, 127, 127, .08) !important; }'
+  ;(document.head || document.documentElement).appendChild(style)
+}
+
 // The desktop app takes some shortcuts in the main process (before-input-event: the HWP
 // editor's Ctrl/⌘+S and +P, which its inner iframe would otherwise swallow). Forward
 // them, from this page and from same-origin frames inside it. The server's platform

@@ -143,6 +143,7 @@ export async function openWorkspace(contents, { src, name, readOnly = false }) {
   await writeFile(file, bytes)
   contents.documentPath = file
   contents.savedHash = createHash('sha256').update(bytes).digest('hex')
+  contents.savedMtime = statSync(file).mtimeMs
   // a preview never publishes: edits stay in the workspace
   if (!readOnly) watchSaves(contents, file)
   return { dir, file }
@@ -162,10 +163,20 @@ function watchSaves(contents, file) {
 }
 
 async function publishSave(contents, file) {
-  if (!existsSync(file) || statSync(file).size === 0) return
+  if (!existsSync(file)) return
+  const st = statSync(file)
+  if (st.size === 0) return
+  // (the document itself written again — not some other file of the workspace)
+  const rewritten = st.mtimeMs !== contents.savedMtime
+  contents.savedMtime = st.mtimeMs
   const bytes = readFileSync(file)
   const hash = createHash('sha256').update(bytes).digest('hex')
-  if (hash === contents.savedHash) return
+  if (hash === contents.savedHash) {
+    // saved again with the same bytes (an edit undone before 저장): nothing to publish, but the page that pressed 저장 hears that it
+    // is saved — as the last published copy, if any (the framing page takes this only while it waits for a save: `unchanged`)
+    if (rewritten) contents.send('office:saved', { name: basename(file), size: bytes.length, url: contents.publishedUrl || null, unchanged: true })
+    return
+  }
   const before = contents.savedHash
   contents.savedHash = hash
   const name = basename(file)
