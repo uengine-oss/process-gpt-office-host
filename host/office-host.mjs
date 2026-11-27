@@ -24,6 +24,7 @@ import { handleWorkerMcp } from './worker-mcp.mjs'
 import { registerSession } from './live.mjs'
 import { staticHandler } from './static.mjs'
 import { findForkRoot } from './fork-root.mjs'
+import { beatFromHost } from './ipc-link.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url)) // host/dist
 const web = resolve(here, '../..')
@@ -95,6 +96,8 @@ wss.on('connection', (socket, req) => {
   const send = (frame) => socket.readyState === socket.OPEN && socket.send(JSON.stringify(frame))
   const contents = new HostWebContents((channel, args) => send({ t: 'event', channel, args: encode(args) }))
   socket.on('close', () => contents.destroy())
+  // (from this side too: a background tab's own heartbeat is slowed by its browser — host/ipc-link.mjs)
+  beatFromHost(socket, send)
 
   const editor = query.get('editor') || ''
   contents.ready = (async () => {

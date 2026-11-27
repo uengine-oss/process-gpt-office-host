@@ -14,15 +14,17 @@ const OPEN = 1
  * → { opened: Promise (rejects if the socket closes first), closed, send(frame): Promise — resolves once sent, rejects when not open }
  */
 export function createLink(socket, { heartbeatMs = HEARTBEAT_MS, every = setInterval, stop = clearInterval } = {}) {
-  let closed = false
+  // (a socket already closing or closed: its close event is past — nothing would ever settle what waits for it)
+  let closed = socket.readyState > OPEN
   const gone = () => new Error('web host disconnected')
   const opened = new Promise((resolve, reject) => {
+    if (closed) return reject(gone())
     if (socket.readyState === OPEN) resolve()
     socket.addEventListener('open', () => resolve(), { once: true })
     socket.addEventListener('close', () => reject(gone()), { once: true })
   })
   opened.catch(() => {})
-  const timer = heartbeatMs > 0 ? every(() => { if (!closed && socket.readyState === OPEN) socket.send('{"t":"ping"}') }, heartbeatMs) : null
+  const timer = heartbeatMs > 0 && !closed ? every(() => { if (!closed && socket.readyState === OPEN) socket.send('{"t":"ping"}') }, heartbeatMs) : null
   socket.addEventListener('close', () => { closed = true; if (timer != null) stop(timer) })
   return {
     opened,
@@ -33,4 +35,15 @@ export function createLink(socket, { heartbeatMs = HEARTBEAT_MS, every = setInte
       socket.send(JSON.stringify(frame))
     },
   }
+}
+
+/**
+ * The host's side of the same: a frame every heartbeatMs on a tab's connection until it closes. A tab in the background has its timers
+ * slowed by the browser (its own ping may come a minute apart, or later on a phone), so the connection is kept busy from here too; the
+ * page takes a frame it does not know (`ping`) as nothing. socket: the ws connection (addEventListener('close')); send(frame) sends.
+ */
+export function beatFromHost(socket, send, { heartbeatMs = HEARTBEAT_MS, every = setInterval, stop = clearInterval } = {}) {
+  const timer = every(() => send({ t: 'ping' }), heartbeatMs)
+  socket.addEventListener('close', () => stop(timer), { once: true })
+  return () => stop(timer)
 }

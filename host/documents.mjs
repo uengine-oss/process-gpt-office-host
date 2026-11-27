@@ -80,12 +80,16 @@ export const newDocumentObject = (ext) => ({
   path: `agent-docs/${Date.now()}_${randomUUID().slice(0, 8)}.${ext}`,
 })
 
-export async function uploadToStorage(object, path, bytes, contentType, auth) {
+// (an upload that hangs would hold every later save of the tab behind it — they go one at a time — and the page waits for its answer)
+export const UPLOAD_TIMEOUT_MS = 60_000
+
+export async function uploadToStorage(object, path, bytes, contentType, auth, { timeoutMs = UPLOAD_TIMEOUT_MS } = {}) {
   const encoded = path.split('/').map(encodeURIComponent).join('/')
   const res = await fetch(`${SUPABASE_URL || object.origin}/storage/v1/object/${object.bucket}/${encoded}`, {
     method: 'POST',
     headers: { ...auth, 'x-upsert': 'true', 'content-type': contentType },
     body: bytes,
+    signal: AbortSignal.timeout(timeoutMs),
   })
   if (!res.ok) throw new Error(`storage upload ${res.status}: ${(await res.text()).slice(0, 200)}`)
   return `${object.origin}/storage/v1/object/public/${object.bucket}/${encoded}`
@@ -177,11 +181,16 @@ async function publishSave(contents, file) {
     // as the copy this session published last, or, before any, with no address (the document is as it was opened: nothing new to point
     // at, so no older address is ever handed back). The framing page takes `unchanged` only while it waits for a save. Only once the
     // publish before it is through (publishes go one at a time). A file system that keeps whole seconds misses a rewrite within the same
-    // second: no answer then.
-    if (rewritten) contents.send('office:saved', { name: basename(file), size: bytes.length, url: contents.publishedUrl || null, unchanged: true })
+    // second: no answer then. Written again since it was read (the editor is saving once more): that save is the one answered.
+    if (rewritten && existsSync(file) && statSync(file).mtimeMs === st.mtimeMs) {
+      contents.send('office:saved', { name: basename(file), size: bytes.length, url: contents.publishedUrl || null, unchanged: true })
+    }
     return
   }
-  const before = contents.savedHash
+  // the bytes whose upload failed, met again with the document not written since (another file of the workspace changed): not sent up by
+  // themselves — nobody asked, and a 「saved」 nobody waits for would tell the page its edits are in. The editor's own save of them again
+  // (its 저장, ⌘S — the page's 다시 시도) writes the document, and that is tried.
+  if (!rewritten && hash === contents.failedHash) return
   contents.savedHash = hash
   const name = basename(file)
   const ext = extname(name).slice(1).toLowerCase()
@@ -196,13 +205,16 @@ async function publishSave(contents, file) {
       // local trial: keep the edit beside the sample, never over it
       await copyFile(file, `${contents.source.local}.edited${extname(name)}`)
     }
+    contents.failedHash = null
     contents.publishedUrl = url
     contents.emit('office-published', url)
     contents.send('office:saved', { name, size: bytes.length, url })
   } catch (err) {
     console.warn(`[web-host] publishing ${name} failed:`, err?.stack || err)
-    // (not published: the next save of the same bytes tries again)
-    contents.savedHash = before
+    // Not published — and what the edited copy holds now is not known (an upload cut off by its time limit may have landed): no bytes count
+    // as saved, so the next save goes up whatever it holds (never 「unchanged」 with an address that may hold something else).
+    contents.savedHash = null
+    contents.failedHash = hash
     contents.send('office:save-failed', { name, error: String(err?.message || err) })
   }
 }

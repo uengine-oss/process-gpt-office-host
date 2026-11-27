@@ -3,7 +3,7 @@
 //   node --test host/ipc-link.test.mjs
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { createLink, HEARTBEAT_MS } from './ipc-link.mjs'
+import { beatFromHost, createLink, HEARTBEAT_MS } from './ipc-link.mjs'
 
 // a stand-in WebSocket: like a browser's, a frame sent while not open is not an error here — it would just be lost
 class FakeSocket extends EventTarget {
@@ -65,4 +65,26 @@ test('a connection that closes before it opens: what waits for it is refused', a
   s.close()
   await assert.rejects(p, /web host disconnected/)
   await assert.rejects(link.opened, /web host disconnected/)
+})
+
+test('a link made on a socket already closed: what waits for it is refused at once (its close event is past)', async () => {
+  const s = new FakeSocket()
+  s.readyState = 3
+  const c = clock()
+  const link = createLink(s, c)
+  assert.equal(link.closed, true)
+  await assert.rejects(link.opened, /web host disconnected/)
+  await assert.rejects(link.send({ t: 'invoke', id: 3, channel: 'markdown:save' }), /web host disconnected/)
+  assert.equal(c.count, 0)
+})
+
+test('the host beats too (a background tab\'s timers are slowed), until the connection closes', () => {
+  const s = new FakeSocket()
+  const c = clock()
+  const out = []
+  beatFromHost(s, (f) => out.push(f), c)
+  c.tick(); c.tick()
+  assert.deepEqual(out, [{ t: 'ping' }, { t: 'ping' }])
+  s.close()
+  assert.equal(c.count, 0)
 })
