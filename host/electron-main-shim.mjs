@@ -78,6 +78,7 @@ export class HostWebContents extends EventEmitter {
       source: null,
       savedHash: null,
       savedMtime: null,
+      publishing: null,
       editedPath: null,
       stopWatch: null,
       workContext: null,

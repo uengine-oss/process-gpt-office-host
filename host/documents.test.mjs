@@ -28,24 +28,29 @@ test('a .txt goes up as text', () => {
   assert.equal(CONTENT_TYPES.txt, 'text/plain; charset=utf-8')
 })
 
-test('new bytes are published and said; the same bytes written again are said as unchanged; another file says nothing', async () => {
+test('new bytes are published and said; the same bytes written again are said as unchanged only after a publish; another file says nothing', async () => {
   const sent = []
   const contents = Object.assign(new EventEmitter(), { send: (channel, payload) => sent.push([channel, payload]) })
   opened.push(contents)
   const { file, dir } = await openWorkspace(contents, { src: 'memo.txt' })
   await wait(300)
+  // the same bytes as opened, written again before anything was published: nothing to say (no copy to name)
+  writeFileSync(file, '첫 줄\n')
+  await wait(1500)
+  assert.deepEqual(sent, [])
   // the editor writes an edit
   writeFileSync(file, '첫 줄\n고친 줄\n')
   await wait(1500)
   assert.deepEqual(sent.map(([c, p]) => [c, !!p.unchanged]), [['office:saved', false]])
-  // (a local trial keeps the edit beside the sample)
+  // (a local trial keeps the edit beside the sample — and has no published address: one as a storage host would have)
   assert.equal(readFileSync(join(samples, 'memo.txt.edited.txt'), 'utf8'), '첫 줄\n고친 줄\n')
+  contents.publishedUrl = 'http://127.0.0.1:54321/storage/v1/object/public/files/test/edited-memo_20261127000000.txt'
   // saved again with the same bytes
   sent.length = 0
   await wait(20)
   writeFileSync(file, '첫 줄\n고친 줄\n')
   await wait(1500)
-  assert.deepEqual(sent.map(([c, p]) => [c, !!p.unchanged]), [['office:saved', true]])
+  assert.deepEqual(sent.map(([c, p]) => [c, !!p.unchanged, p.url]), [['office:saved', true, contents.publishedUrl]])
   // another file of the workspace (an asset, a temporary file)
   sent.length = 0
   writeFileSync(join(dir, 'other.tmp'), 'x')

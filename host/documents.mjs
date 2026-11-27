@@ -154,7 +154,8 @@ function watchSaves(contents, file) {
   let timer
   const watcher = watch(contents.workspace, () => {
     clearTimeout(timer)
-    timer = setTimeout(() => void publishSave(contents, file), 800)
+    // (one publish at a time: a save that comes while one is going up is looked at once that one is done)
+    timer = setTimeout(() => { contents.publishing = (contents.publishing || Promise.resolve()).then(() => publishSave(contents, file)).catch(() => {}) }, 800)
   })
   contents.stopWatch = () => {
     clearTimeout(timer)
@@ -172,9 +173,11 @@ async function publishSave(contents, file) {
   const bytes = readFileSync(file)
   const hash = createHash('sha256').update(bytes).digest('hex')
   if (hash === contents.savedHash) {
-    // saved again with the same bytes (an edit undone before 저장): nothing to publish, but the page that pressed 저장 hears that it
-    // is saved — as the last published copy, if any (the framing page takes this only while it waits for a save: `unchanged`)
-    if (rewritten) contents.send('office:saved', { name: basename(file), size: bytes.length, url: contents.publishedUrl || null, unchanged: true })
+    // saved again with the same bytes (an edit undone before 저장) after this session published them: nothing to publish, but the page
+    // that pressed 저장 hears it is saved, as that copy (the framing page takes `unchanged` only while it waits for a save). Not before
+    // anything was published (nothing to name), and only once the publish before it is through (publishes go one at a time). A file
+    // system that keeps whole seconds misses a rewrite within the same second: no answer then.
+    if (rewritten && contents.publishedUrl) contents.send('office:saved', { name: basename(file), size: bytes.length, url: contents.publishedUrl, unchanged: true })
     return
   }
   const before = contents.savedHash
