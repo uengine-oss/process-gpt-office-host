@@ -18,11 +18,33 @@ process.env.IEUM_HOST_DATA = data
 writeFileSync(join(samples, 'memo.txt'), '첫 줄\n')
 writeFileSync(join(samples, 'draft.txt'), '첫 줄\n')
 writeFileSync(join(samples, 'again.txt'), '첫 줄\n')
-const { openWorkspace, CONTENT_TYPES, uploadToStorage, UPLOAD_TIMEOUT_MS } = await import('./documents.mjs')
+// A storage stand-in for the uploads to Supabase (the document is downloaded from it, its edited copies go up to it): state.fail makes
+// the next uploads answer 503; posts are the uploads it took
+const store = { fail: 0, posts: [] }
+const storage = createServer((req, res) => {
+  if (req.method === 'GET') return void res.end('첫 줄\n')
+  const parts = []
+  req.on('data', (c) => parts.push(c))
+  req.on('end', () => {
+    const path = decodeURIComponent(req.url.replace(/^\/storage\/v1\/object\/files\//, ''))
+    if (store.fail > 0) { store.fail--; store.posts.push({ path, failed: true }); return void res.writeHead(503).end('{"error":"unavailable (test)"}') }
+    store.posts.push({ path, body: Buffer.concat(parts).toString('utf8') })
+    res.end('{"Key":"ok"}')
+  })
+})
+await new Promise((r) => storage.listen(0, '127.0.0.1', r))
+const STORE = `http://127.0.0.1:${storage.address().port}`
+process.env.IEUM_ALLOWED_SOURCES = STORE
+process.env.SUPABASE_ANON_KEY = 'anon (test)'
+delete process.env.SUPABASE_URL
+delete process.env.SUPABASE_SERVICE_ROLE_KEY
+delete process.env.SUPABASE_KEY
+const { openWorkspace, CONTENT_TYPES, uploadToStorage, uploadLimitMs, editedObjectPath } = await import('./documents.mjs')
 const wait = (ms) => new Promise((r) => setTimeout(r, ms))
 
 const opened = []
 after(() => {
+  storage.close()
   for (const c of opened) c.emit('destroyed')
   rmSync(samples, { recursive: true, force: true })
   rmSync(data, { recursive: true, force: true })
@@ -63,21 +85,70 @@ test('new bytes are published and said; the same bytes written again are said as
   assert.deepEqual(sent, [])
 })
 
-test('an upload that does not fail but never ends is given up after its time limit (not waited on with every later save behind it)', async () => {
-  // (below the page's own wait for a save — Process GPT Lite SAVE_WAIT_MS 30 s — less the editor's write and the watcher's 0.8 s)
-  assert.ok(UPLOAD_TIMEOUT_MS <= 20_000)
-  const hung = []
-  const server = createServer((req) => { hung.push(req) })
+test('an upload may take a base time plus time for its size (not cut off for being large); past that it is given up', async () => {
+  // a document of a few MB: well inside the page's own wait for a save (Process GPT Lite SAVE_WAIT_MS 30 s); a large one gets longer
+  // (and is announced to the page — office:saving, below)
+  assert.ok(uploadLimitMs(3 * 1024 * 1024) < 30_000)
+  assert.ok(uploadLimitMs(3 * 1024 * 1024) >= 15_000)
+  assert.ok(uploadLimitMs(50 * 1024 * 1024) > 100_000)
+  assert.ok(uploadLimitMs(20 * 1024 * 1024) > uploadLimitMs(10 * 1024 * 1024))
+  const held = []
+  const server = createServer((req, res) => {
+    held.push(req)
+    if (req.url.includes('stuck')) return // takes the request, answers nothing
+    // takes it all, then answers slowly (1.2 s)
+    req.resume()
+    req.on('end', () => { res.writeHead(200, { 'content-type': 'application/json' }); setTimeout(() => res.end('{"Key":"ok"}'), 1200) })
+  })
   await new Promise((r) => server.listen(0, '127.0.0.1', r))
   const origin = `http://127.0.0.1:${server.address().port}`
+  const up = (path, timeoutMs) => uploadToStorage({ origin, bucket: 'files' }, path, Buffer.from('x'), 'text/plain', {}, { timeoutMs })
   try {
-    const t0 = Date.now()
-    await assert.rejects(uploadToStorage({ origin, bucket: 'files' }, 'pgpt-pro/u/copies/edited-x.txt', Buffer.from('x'), 'text/plain', {}, { timeoutMs: 300 }), /abort|timeout/i)
-    assert.ok(Date.now() - t0 < 5000)
+    let t0 = Date.now()
+    await assert.rejects(up('stuck/edited-x_20261127000000.txt', 300), /abort|timeout/i)
+    assert.ok(Date.now() - t0 < 3000)
+    // slow, but inside its limit: it goes up
+    t0 = Date.now()
+    assert.match(await up('slow/edited-x_20261127000000.txt', 3000), /slow/)
+    assert.ok(Date.now() - t0 > 1000)
   } finally {
-    for (const r of hung) r.socket.destroy()
+    for (const r of held) r.socket.destroy()
     server.close()
   }
+})
+
+test('after an upload that failed, the opening saves to a new address of its own (edited-<stem>_<14 digits>, a later time) — a late landing of the old one cannot overwrite a newer save', async () => {
+  assert.equal(editedObjectPath('pgpt-pro/u/att/memo.txt', 'txt', { after: 'pgpt-pro/u/att/edited-memo_29991231235959.txt' }), 'pgpt-pro/u/att/edited-memo_30000101000000.txt')
+  assert.match(editedObjectPath('pgpt-pro/u/copies/edited-ab_20261127000000.txt', 'txt'), /\/edited-ab_\d{14}\.txt$/)
+  const sent = []
+  const contents = Object.assign(new EventEmitter(), { send: (channel, payload) => sent.push([channel, payload]), userToken: 'user (test)' })
+  opened.push(contents)
+  const { file } = await openWorkspace(contents, { src: `${STORE}/storage/v1/object/public/files/pgpt-pro/u/att/memo.txt`, name: 'memo.txt' })
+  await wait(300)
+  store.fail = 1
+  writeFileSync(file, '첫 줄\n고친 줄\n')
+  await wait(1500)
+  // (each upload announced first, with how long the page should wait for it)
+  assert.deepEqual(sent.map(([c]) => c), ['office:saving', 'office:save-failed'])
+  assert.equal(sent[0][1].limitMs, uploadLimitMs(sent[0][1].size))
+  sent.length = 0
+  await wait(20)
+  writeFileSync(file, '첫 줄\n고친 줄\n또 고친 줄\n')
+  await wait(1500)
+  assert.deepEqual(sent.map(([c]) => c), ['office:saving', 'office:saved'])
+  const [first, second] = store.posts
+  assert.equal(first.failed, true)
+  for (const p of [first.path, second.path]) assert.match(p, /^pgpt-pro\/u\/att\/edited-memo_\d{14}\.txt$/)
+  assert.ok(second.path > first.path, `${second.path} after ${first.path}`)
+  assert.equal(second.body, '첫 줄\n고친 줄\n또 고친 줄\n')
+  // the page is told where it went
+  assert.ok(sent[1][1].url.endsWith(second.path.split('/').map(encodeURIComponent).join('/')))
+  // a save after a good one stays where it is (one address per opening, until an upload fails)
+  sent.length = 0
+  await wait(20)
+  writeFileSync(file, '첫 줄\n')
+  await wait(1500)
+  assert.equal(store.posts[2].path, second.path)
 })
 
 test('an upload that failed: no bytes count as saved after it, and its bytes go up again only when the editor writes the document again', async () => {

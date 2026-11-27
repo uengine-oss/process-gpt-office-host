@@ -34,17 +34,22 @@ export const safeName = (name) =>
     .replace(/[\u0000-\u001f<>:"|?*\\]/g, '_')
     .slice(-180) || 'document'
 
-export const stamp = () => new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14)
+export const stamp = (at = new Date()) => at.toISOString().replace(/[-:T]/g, '').slice(0, 14)
 
 /**
  * where the edited copy of a stored object goes: beside it, `edited-<stem>_<time>.<ext>`.
  * Named after the stored object, not the display name (storage keys must stay ASCII);
  * an edited copy of an edited copy keeps the original stem instead of edited-edited-….
+ * after: an edited copy this one must come after (a new address for the same opening — publishSave): its time plus a second at
+ * least, so the two never share a name (the form stays edited-<stem>_<14 digits>: Process GPT Lite's checks and its copies job read it).
  */
-export function editedObjectPath(path, ext) {
+export function editedObjectPath(path, ext, { after = null } = {}) {
   const stem = path.split('/').pop().replace(/\.[^.]+$/, '')
   const base = (/^edited-(.+)_\d{14}$/.exec(stem) || [])[1] || stem
-  return path.replace(/[^/]*$/, `edited-${base}_${stamp()}.${ext}`)
+  let time = stamp()
+  const prev = after && /_(\d{14})\.[^./]+$/.exec(after)?.[1]
+  if (prev && time <= prev) time = stamp(new Date(Date.UTC(+prev.slice(0, 4), +prev.slice(4, 6) - 1, +prev.slice(6, 8), +prev.slice(8, 10), +prev.slice(10, 12), +prev.slice(12, 14)) + 1000))
+  return path.replace(/[^/]*$/, `edited-${base}_${time}.${ext}`)
 }
 
 /**
@@ -80,12 +85,17 @@ export const newDocumentObject = (ext) => ({
   path: `agent-docs/${Date.now()}_${randomUUID().slice(0, 8)}.${ext}`,
 })
 
-// (an upload that hangs would hold every later save of the tab behind it — they go one at a time — and the page waits for its answer).
-// Below the page's own wait for a save (Process GPT Lite SAVE_WAIT_MS, 30 s, counted from the press: the editor's write and the
-// watcher's 0.8 s come first), so a page that says a save failed has heard it from here — the upload has stopped, it is not still going.
-export const UPLOAD_TIMEOUT_MS = 20_000
+// How long an upload may take: a base for any file plus time for its size at a slow rate (a large file on a slow link is not cut off
+// for being large) — 15 s for a few-MB document, well inside the page's own wait for a save (Process GPT Lite SAVE_WAIT_MS, 30 s). A
+// longer one is announced to the page first (office:saving { limitMs }), which then waits that long. An upload past its limit is given
+// up (stuck, it would hold every later save of the tab behind it — they go one at a time), so a page that says a save failed has heard
+// it from here: the upload has stopped. (Not 「nothing moved for N s」: what the network has not sent yet sits in the socket's buffer,
+// several MB, out of sight — a slow link draining it looks stuck.) IEUM_UPLOAD_BASE_MS · IEUM_UPLOAD_MIN_RATE (bytes/s) change them.
+export const UPLOAD_BASE_MS = Number(process.env.IEUM_UPLOAD_BASE_MS) || 15_000
+export const UPLOAD_MIN_RATE = Number(process.env.IEUM_UPLOAD_MIN_RATE) || 512 * 1024
+export const uploadLimitMs = (size) => UPLOAD_BASE_MS + Math.ceil((Math.max(0, size) / UPLOAD_MIN_RATE) * 1000)
 
-export async function uploadToStorage(object, path, bytes, contentType, auth, { timeoutMs = UPLOAD_TIMEOUT_MS } = {}) {
+export async function uploadToStorage(object, path, bytes, contentType, auth, { timeoutMs = uploadLimitMs(bytes.length) } = {}) {
   const encoded = path.split('/').map(encodeURIComponent).join('/')
   const res = await fetch(`${SUPABASE_URL || object.origin}/storage/v1/object/${object.bucket}/${encoded}`, {
     method: 'POST',
@@ -164,6 +174,8 @@ function watchSaves(contents, file) {
     clearTimeout(timer)
     timer = setTimeout(() => publish(), 800)
   })
+  // (a watcher that fails — the folder removed under it — must not take the host, and every open document, down with it)
+  watcher.on('error', (err) => console.warn(`[web-host] watching ${contents.workspace} failed:`, err?.message || err))
   // The page asks for the editor's last write to be sent up (`republish`): the editor has nothing newer — its 저장 is off — and the page
   // needs that write in storage (an upload of it failed; a save the page must see answered). Answered like a save: 「saved」 (sent up, or
   // the same bytes as the last one up — `unchanged`) or 「save-failed」. Editors whose own key or button does nothing then (the
@@ -211,7 +223,10 @@ async function publishSave(contents, file, { asked = false } = {}) {
     const auth = object && storageAuth(contents.userToken)
     if (auth) {
       contents.editedPath ??= editedObjectPath(object.path, ext)
-      url = await uploadToStorage(object, contents.editedPath, bytes, CONTENT_TYPES[ext] || 'application/octet-stream', auth)
+      // (the page waits for this save's answer as long as the upload may take — longer than its own 30 s for a large file)
+      const limitMs = uploadLimitMs(bytes.length)
+      contents.send('office:saving', { name, size: bytes.length, limitMs })
+      url = await uploadToStorage(object, contents.editedPath, bytes, CONTENT_TYPES[ext] || 'application/octet-stream', auth, { timeoutMs: limitMs })
     } else if (contents.source?.local) {
       // local trial: keep the edit beside the sample, never over it
       await copyFile(file, `${contents.source.local}.edited${extname(name)}`)
@@ -222,10 +237,13 @@ async function publishSave(contents, file, { asked = false } = {}) {
     contents.send('office:saved', { name, size: bytes.length, url })
   } catch (err) {
     console.warn(`[web-host] publishing ${name} failed:`, err?.stack || err)
-    // Not published — and what the edited copy holds now is not known (an upload cut off by its time limit may have landed): no bytes count
-    // as saved, so the next save goes up whatever it holds (never 「unchanged」 with an address that may hold something else).
+    // Not published — and what the edited copy holds now is not known (an upload cut off by its limit may still land, after a later
+    // one): no bytes count as saved, so the next save goes up whatever it holds (never 「unchanged」 with an address that may hold
+    // something else), and to a new address of its own — a late landing of this one cannot overwrite it. The page takes the address of
+    // each save from its answer.
     contents.savedHash = null
     contents.failedHash = hash
+    if (contents.editedPath && contents.source?.object) contents.editedPath = editedObjectPath(contents.source.object.path, ext, { after: contents.editedPath })
     contents.send('office:save-failed', { name, error: String(err?.message || err) })
   }
 }

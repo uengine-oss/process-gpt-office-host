@@ -83,10 +83,11 @@ function connect() {
       subscribers.get(frame.channel)?.forEach((fn) => fn({ sender: ipcRenderer }, ...args))
     }
   })
-  socket.addEventListener('close', () => {
+  socket.addEventListener('close', (event) => {
     for (const call of pending.values()) call.reject(new Error('web host disconnected'))
     pending.clear()
-    toParent('closed', {})
+    // (the close code tells the page why: 1006 a connection cut, 1011 the host failed, 1001 the host going away)
+    toParent('closed', { code: event.code })
   })
 }
 connect()
