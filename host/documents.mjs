@@ -173,11 +173,12 @@ async function publishSave(contents, file) {
   const bytes = readFileSync(file)
   const hash = createHash('sha256').update(bytes).digest('hex')
   if (hash === contents.savedHash) {
-    // saved again with the same bytes (an edit undone before 저장) after this session published them: nothing to publish, but the page
-    // that pressed 저장 hears it is saved, as that copy (the framing page takes `unchanged` only while it waits for a save). Not before
-    // anything was published (nothing to name), and only once the publish before it is through (publishes go one at a time). A file
-    // system that keeps whole seconds misses a rewrite within the same second: no answer then.
-    if (rewritten && contents.publishedUrl) contents.send('office:saved', { name: basename(file), size: bytes.length, url: contents.publishedUrl, unchanged: true })
+    // saved again with the same bytes (an edit undone before 저장): nothing to publish, but the page that pressed 저장 hears it is saved —
+    // as the copy this session published last, or, before any, with no address (the document is as it was opened: nothing new to point
+    // at, so no older address is ever handed back). The framing page takes `unchanged` only while it waits for a save. Only once the
+    // publish before it is through (publishes go one at a time). A file system that keeps whole seconds misses a rewrite within the same
+    // second: no answer then.
+    if (rewritten) contents.send('office:saved', { name: basename(file), size: bytes.length, url: contents.publishedUrl || null, unchanged: true })
     return
   }
   const before = contents.savedHash

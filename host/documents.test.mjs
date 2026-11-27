@@ -28,16 +28,17 @@ test('a .txt goes up as text', () => {
   assert.equal(CONTENT_TYPES.txt, 'text/plain; charset=utf-8')
 })
 
-test('new bytes are published and said; the same bytes written again are said as unchanged only after a publish; another file says nothing', async () => {
+test('new bytes are published and said; the same bytes written again are said as unchanged (with the last published address, or none before any); another file says nothing', async () => {
   const sent = []
   const contents = Object.assign(new EventEmitter(), { send: (channel, payload) => sent.push([channel, payload]) })
   opened.push(contents)
   const { file, dir } = await openWorkspace(contents, { src: 'memo.txt' })
   await wait(300)
-  // the same bytes as opened, written again before anything was published: nothing to say (no copy to name)
+  // the same bytes as opened, written again before anything was published: said as unchanged, with no address (nothing new to point at)
   writeFileSync(file, '첫 줄\n')
   await wait(1500)
-  assert.deepEqual(sent, [])
+  assert.deepEqual(sent.map(([c, p]) => [c, !!p.unchanged, p.url]), [['office:saved', true, null]])
+  sent.length = 0
   // the editor writes an edit
   writeFileSync(file, '첫 줄\n고친 줄\n')
   await wait(1500)
