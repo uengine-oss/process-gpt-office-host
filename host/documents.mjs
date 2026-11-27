@@ -80,8 +80,10 @@ export const newDocumentObject = (ext) => ({
   path: `agent-docs/${Date.now()}_${randomUUID().slice(0, 8)}.${ext}`,
 })
 
-// (an upload that hangs would hold every later save of the tab behind it — they go one at a time — and the page waits for its answer)
-export const UPLOAD_TIMEOUT_MS = 60_000
+// (an upload that hangs would hold every later save of the tab behind it — they go one at a time — and the page waits for its answer).
+// Below the page's own wait for a save (Process GPT Lite SAVE_WAIT_MS, 30 s, counted from the press: the editor's write and the
+// watcher's 0.8 s come first), so a page that says a save failed has heard it from here — the upload has stopped, it is not still going.
+export const UPLOAD_TIMEOUT_MS = 20_000
 
 export async function uploadToStorage(object, path, bytes, contentType, auth, { timeoutMs = UPLOAD_TIMEOUT_MS } = {}) {
   const encoded = path.split('/').map(encodeURIComponent).join('/')
@@ -156,23 +158,32 @@ export async function openWorkspace(contents, { src, name, readOnly = false }) {
 /** the editor writes its file in place (often via a temp file + rename): watch the folder */
 function watchSaves(contents, file) {
   let timer
+  // (one publish at a time: a save that comes while one is going up is looked at once that one is done)
+  const publish = (opts) => { contents.publishing = (contents.publishing || Promise.resolve()).then(() => publishSave(contents, file, opts)).catch(() => {}) }
   const watcher = watch(contents.workspace, () => {
     clearTimeout(timer)
-    // (one publish at a time: a save that comes while one is going up is looked at once that one is done)
-    timer = setTimeout(() => { contents.publishing = (contents.publishing || Promise.resolve()).then(() => publishSave(contents, file)).catch(() => {}) }, 800)
+    timer = setTimeout(() => publish(), 800)
   })
+  // The page asks for the editor's last write to be sent up (`republish`): the editor has nothing newer — its 저장 is off — and the page
+  // needs that write in storage (an upload of it failed; a save the page must see answered). Answered like a save: 「saved」 (sent up, or
+  // the same bytes as the last one up — `unchanged`) or 「save-failed」. Editors whose own key or button does nothing then (the
+  // spreadsheet refuses Ctrl+S on the web host, the slides ignore it) are saved again this way.
+  contents.republish = () => publish({ asked: true })
   contents.stopWatch = () => {
     clearTimeout(timer)
     watcher.close()
   }
 }
 
-async function publishSave(contents, file) {
-  if (!existsSync(file)) return
+async function publishSave(contents, file, { asked = false } = {}) {
+  if (!existsSync(file) || statSync(file).size === 0) {
+    // (asked for, it is answered: the editor has written nothing yet — a new document)
+    if (asked) contents.send('office:save-failed', { name: basename(file), error: 'nothing saved yet' })
+    return
+  }
   const st = statSync(file)
-  if (st.size === 0) return
-  // (the document itself written again — not some other file of the workspace)
-  const rewritten = st.mtimeMs !== contents.savedMtime
+  // (the document itself written again — not some other file of the workspace — or the page asking for it: answered either way)
+  const rewritten = asked || st.mtimeMs !== contents.savedMtime
   contents.savedMtime = st.mtimeMs
   const bytes = readFileSync(file)
   const hash = createHash('sha256').update(bytes).digest('hex')

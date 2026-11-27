@@ -17,6 +17,7 @@ process.env.IEUM_WORKSPACE = samples
 process.env.IEUM_HOST_DATA = data
 writeFileSync(join(samples, 'memo.txt'), '첫 줄\n')
 writeFileSync(join(samples, 'draft.txt'), '첫 줄\n')
+writeFileSync(join(samples, 'again.txt'), '첫 줄\n')
 const { openWorkspace, CONTENT_TYPES, uploadToStorage, UPLOAD_TIMEOUT_MS } = await import('./documents.mjs')
 const wait = (ms) => new Promise((r) => setTimeout(r, ms))
 
@@ -63,7 +64,8 @@ test('new bytes are published and said; the same bytes written again are said as
 })
 
 test('an upload that does not fail but never ends is given up after its time limit (not waited on with every later save behind it)', async () => {
-  assert.equal(UPLOAD_TIMEOUT_MS, 60_000)
+  // (below the page's own wait for a save — Process GPT Lite SAVE_WAIT_MS 30 s — less the editor's write and the watcher's 0.8 s)
+  assert.ok(UPLOAD_TIMEOUT_MS <= 20_000)
   const hung = []
   const server = createServer((req) => { hung.push(req) })
   await new Promise((r) => server.listen(0, '127.0.0.1', r))
@@ -117,4 +119,35 @@ test('an upload that failed: no bytes count as saved after it, and its bytes go 
   await wait(1500)
   assert.deepEqual(sent.map(([c, p]) => [c, !!p.unchanged]), [['office:saved', false]])
   assert.equal(readFileSync(blocked, 'utf8'), '첫 줄\n고친 줄\n')
+})
+
+test('the page asks for the editor\'s last write to go up again (republish): answered as a save — unchanged when it is up, sent when its upload failed', async () => {
+  const sent = []
+  const contents = Object.assign(new EventEmitter(), { send: (channel, payload) => sent.push([channel, payload]) })
+  opened.push(contents)
+  const { file } = await openWorkspace(contents, { src: 'again.txt' })
+  await wait(300)
+  // nothing written since it opened: answered at once, as the document it opened (no address)
+  contents.republish()
+  await wait(300)
+  assert.deepEqual(sent.map(([c, p]) => [c, !!p.unchanged, p.url]), [['office:saved', true, null]])
+  // a write whose upload fails; the editor takes it as saved and writes nothing more
+  const blocked = join(samples, 'again.txt.edited.txt')
+  mkdirSync(blocked)
+  sent.length = 0
+  writeFileSync(file, '첫 줄\n고친 줄\n')
+  await wait(1500)
+  assert.deepEqual(sent.map(([c]) => c), ['office:save-failed'])
+  rmSync(blocked, { recursive: true, force: true })
+  // asked: the same bytes go up (the document was not written again — the editor's 저장 is off)
+  sent.length = 0
+  contents.republish()
+  await wait(500)
+  assert.deepEqual(sent.map(([c, p]) => [c, !!p.unchanged]), [['office:saved', false]])
+  assert.equal(readFileSync(blocked, 'utf8'), '첫 줄\n고친 줄\n')
+  // and asked again: they are up — unchanged
+  sent.length = 0
+  contents.republish()
+  await wait(300)
+  assert.deepEqual(sent.map(([c, p]) => [c, !!p.unchanged]), [['office:saved', true]])
 })

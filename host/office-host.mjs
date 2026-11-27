@@ -125,6 +125,8 @@ wss.on('connection', (socket, req) => {
     const reply = (value, error) => send({ t: 'reply', id: frame.id, ...(error ? { error } : { value: encode(value) }) })
     try {
       await contents.ready
+      // the page asks for the editor's last write to be sent up again (host/documents.mjs watchSaves)
+      if (frame.t === 'republish') return void contents.republish?.()
       if (frame.t === 'context') {
         contents.workContext = sanitizeContext(frame.context)
         if (contents.workContext) {

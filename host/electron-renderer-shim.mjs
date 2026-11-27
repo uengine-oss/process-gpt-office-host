@@ -67,7 +67,8 @@ function connect() {
   // (a heartbeat keeps it from going idle; a frame for a closed socket is refused at once — host/ipc-link.mjs)
   link = createLink(socket)
   open = link.opened
-  void open.then(() => toParent('ready', { editor: typeof __IEUM_EDITOR__ === 'string' ? __IEUM_EDITOR__ : '' }), () => {})
+  // (republish: this host sends the editor's last write up again when the page asks — host/documents.mjs)
+  void open.then(() => toParent('ready', { editor: typeof __IEUM_EDITOR__ === 'string' ? __IEUM_EDITOR__ : '', republish: true }), () => {})
   socket.addEventListener('message', (message) => {
     const frame = JSON.parse(message.data)
     if (frame.t === 'reply') {
@@ -99,6 +100,8 @@ function post(frame) {
 window.addEventListener('message', (event) => {
   if (event.source !== window.parent || event.data?.source !== 'process-gpt') return
   if (event.data.type === 'context') void post({ t: 'context', context: event.data.context }).catch(() => {})
+  // the editor's last write up again (its 저장 is off: it has nothing newer — an upload of it failed, or the page must see a save answered)
+  else if (event.data.type === 'republish') void post({ t: 'republish' }).catch(() => {})
 })
 
 // One assistant: a framing page with its own (process-gpt's chat, which edits this open
